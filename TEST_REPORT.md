@@ -1,44 +1,190 @@
 # Test Report
 
-Local verification on 2026-07-06. GitHub upload has not been performed.
+Verification date: 2026-07-06
 
-## Passed
+Verification source: GitHub fresh clone, not the original local candidate tree.
 
-- `.venv/bin/python scripts/sufen_rebrand_check.py` -> `sufen-rebrand-check ok`
-- `.venv/bin/python scripts/sufen_secret_scan.py` -> `sufen-secret-scan ok`
-- `.venv/bin/python -m pytest tests/sufen -q` -> `30 passed`
-- `.venv/bin/python -m compileall -q ...` over SuFen packages and retained runtime modules -> passed
-- `.venv/bin/sufen --version` -> `SuFen-Agent v0.1.0`
-- `.venv/bin/python -m pip install -e '.[all]' --no-build-isolation` -> installed `sufen-agent-0.1.0`
-- `UV_CACHE_DIR=.uv-cache ./.local/bin/uv lock` -> refreshed `uv.lock` after removing non-SuFen optional extras from first-release metadata
-- `package-lock.json` check -> root package only, no Node dependencies or inherited workspace packages
-- Python metadata check -> optional extras are exactly `all`, `dev`, and `web`; `[all]` only installs `sufen-agent[web]`
-- Fresh clone env check -> local `.env` values are loaded for `SUFEN_*`, process env still wins, and non-SuFen keys are ignored
-- SuFen web env isolation check -> SuFen mode uses `SUFEN_TAVILY_API_KEY` for Tavily from process env or local `.env`, and ignores generic `TAVILY_API_KEY`
-- Tavily provider request check -> plugin-level Tavily requests also resolve `SUFEN_TAVILY_API_KEY` from process env or local `.env`
-- SuFen runtime tool schema check -> `get_tool_definitions(enabled_toolsets=["sufen"])` exposes exactly the 10 first-release whitelist tools when `SUFEN_TAVILY_API_KEY` is present
-- SuFen closed-runtime check -> `SUFEN_AGENT_MODE=1` makes `all` resolve only to `sufen`, hides inherited toolsets, skips inherited plugin discovery, and registers only the 10 whitelist tools in `model_tools`
-- Provider registry check -> `SUFEN_AGENT_MODE=1` discovers only the reviewed DeepSeek provider profile
-- Unsafe task-package check -> HTTP `/v1/chat` and `sufen chat --task-package ...` return structured fail-closed JSON instead of raising when denied safety actions are missing
-- System prompt safety check -> SuFen mode skips inherited SOUL identity and subscription/portal guidance while keeping SuFen policy in the actual system message
-- Direct SuFen system prompt build check -> `SUFEN_AGENT_MODE=1` builds without importing inherited `run_agent` runtime and includes `你是 SuFen`, `资料优先`, and the actual system-message验收要求
-- `git ls-files --cached --others --exclude-standard` candidate scan -> 108 first-release files; no legacy README, website, installer, TUI, desktop, skills, old tests, old CLI/gateway package, platform gateway paths, old terminal/code/browser/message tools, or non-reviewed web/model-provider plugin directories
-- Clean candidate import from `/private/tmp/sufen-candidate-final.331bCy` -> core modules import with `SUFEN_AGENT_MODE=1`, and `sufen_cli` modules loaded: `[]`
-- `.venv/bin/python -m pip wheel . --no-deps --no-build-isolation -w /private/tmp/sufen-wheel-round2-default` from the full local tree -> built `sufen_agent-0.1.0-py3-none-any.whl`; SuFen build filter cleaned stale `build/lib` output before packaging
-- Wheel content check -> 92 files; includes `sufen/property_strategy.py`, `sufen/policy/system.md`, `sufen/time.py`, the reviewed DeepSeek provider, and the Tavily web provider; excludes old CLI package, gateway package, TUI, desktop, website, installer scripts, old platform plugins, optional skills, old broad entry scripts, old terminal/code/browser/message tools, approval/managed gateway helpers, non-Tavily web plugins, non-reviewed model-provider plugins, and the inherited time module
-- Wheel brand/path check -> 0 hits for old agent identity strings, old command package name, old rebrand reference, old core module names, non-SuFen key names, and removed inherited managed-subscription/portal wording
-- Wheel smoke check -> `sufen --version` returns `SuFen-Agent v0.1.0`, SuFen policy is present in a built system message, and no old CLI package is imported
-- Wheel isolation check -> after installing into `/private/tmp/sufen-wheel-install-round2-default` and removing editable finders, blocked modules such as `tools.terminal_tool`, `tools.browser_tool`, `tools.code_execution_tool`, `agent.lsp`, `agent.pet`, `toolset_distributions`, and `trajectory_compressor` are not importable
-- Wheel metadata check -> `Provides-Extra` is only `dev`, `web`, and `all`
-- `GET /health` on local server -> passed with `{"ok":true,"service":"sufen-agent","version":"0.1.0"}`; latest local smoke used fake provider/model on port 8793
-- `POST /v1/chat` without `taskPackage` -> structured fail-closed JSON with `missingAuthorizationRequests`
-- `POST /v1/chat` with a fake property task package -> structured JSON with strategy answer, event draft, field diff draft, memoryPatch, and tool audit
-- Chat-completions request payload probe -> SuFen policy appears in the actual system message sent through request kwargs
-- `sufen chat -q "帮我分析这个房源 AUTH-P-1 KGREF-property-maintenance"` -> structured JSON with `answer`, `evidenceUsed`, `missingAuthorizationRequests`, `eventDrafts`, `fieldPatchDrafts`, `memoryPatch`, and `toolAudit`
+Validated Git commit:
 
-## Notes
+```text
+64272336f4db4c45c500692dde20f72c56697519
+```
 
-- The localhost server smoke required sandbox escalation only to bind and call `127.0.0.1`.
-- Broad deletion of inherited UI/docs/plugin directories was not performed in this pass; first-release delivery now excludes those public surfaces through `.gitignore`, `MANIFEST.in`, and default-closed install paths.
-- Some inherited internal compatibility symbols remain in retained core helpers. They are kept to preserve the mature conversation/provider/compression loop, while SuFen CLI/API, docs, env template, default toolset, provider discovery, system policy, and first-release wheel entry paths are SuFen-branded.
-- GitHub upload has not been performed.
+Fresh clone directory:
+
+```text
+/tmp/sufen-agent-fresh
+```
+
+Note: the host did not have a global `uv` command, so `uv` was installed into `/tmp/sufen-uv-venv` only for verification. All project checks below were run with `uv run --python 3.11` from the GitHub fresh clone.
+
+## Fresh Clone Setup
+
+```bash
+rm -rf /tmp/sufen-agent-fresh /tmp/sufen-wheel-check /tmp/sufen-uv-cache /tmp/sufen-uv-python
+git clone git@github.com:52707407SXG/SuFen_Agent.git /tmp/sufen-agent-fresh
+cd /tmp/sufen-agent-fresh
+git rev-parse HEAD
+git ls-files sufen
+```
+
+Result:
+
+```text
+HEAD = 64272336f4db4c45c500692dde20f72c56697519
+sufen/ package present with 19 tracked files, including cli.py, server.py, build.py, policy/system.md, prompt/identity.py, memory.py, output.py, task_package.py, and property_strategy.py.
+```
+
+## Required Commands
+
+```bash
+uv run --python 3.11 python -c "import sufen; print(sufen.__file__)"
+```
+
+Result:
+
+```text
+/private/tmp/sufen-agent-fresh/sufen/__init__.py
+passed
+```
+
+```bash
+uv run --python 3.11 python -m pip install -e ".[all]"
+```
+
+Result:
+
+```text
+Successfully installed sufen-agent-0.1.0
+passed
+```
+
+```bash
+uv run --python 3.11 pytest tests/sufen -q
+```
+
+Result:
+
+```text
+31 passed in 1.46s
+```
+
+```bash
+uv run --python 3.11 sufen --version
+```
+
+Result:
+
+```text
+SuFen-Agent v0.1.0
+passed
+```
+
+```bash
+uv run --python 3.11 python -m pip wheel . --no-deps --no-build-isolation -w /tmp/sufen-wheel-check
+```
+
+Result:
+
+```text
+Successfully built sufen-agent
+wheel: sufen_agent-0.1.0-py3-none-any.whl
+passed
+```
+
+## Supplemental Runtime Checks
+
+```bash
+uv run --python 3.11 sufen chat -q "AUTH-P-1 KGREF-property-maintenance 这个房源怎么维护" --task-package /tmp/sufen-property-task.json
+```
+
+Result:
+
+```text
+cli-json-ok {'answer': True, 'eventDrafts': True, 'fieldPatchDrafts': True, 'memoryPatch': True, 'toolAudit': True}
+passed
+```
+
+```bash
+uv run --python 3.11 sufen serve --host 127.0.0.1 --port 8791
+curl -s http://127.0.0.1:8791/health
+```
+
+Result:
+
+```json
+{"ok":true,"service":"sufen-agent","version":"0.1.0","provider":"deepseek","model":"deepseek-v4-pro"}
+```
+
+```bash
+curl -s http://127.0.0.1:8791/v1/chat \
+  -H 'content-type: application/json' \
+  -d '{"query":"AUTH-P-1 这个房源怎么维护"}'
+```
+
+Result:
+
+```text
+missingAuthorizationRequests[0].reason = missing_task_package
+toolAudit[0].action = require_backend_injected_scope
+passed
+```
+
+```bash
+curl -s http://127.0.0.1:8791/v1/chat \
+  -H 'content-type: application/json' \
+  -d @/tmp/sufen-property-request.json
+```
+
+Result:
+
+```text
+http-chat-ok {'answer': True, 'eventDrafts': True, 'fieldPatchDrafts': True, 'memoryPatch': True, 'toolAudit': True}
+passed
+```
+
+```bash
+SUFEN_AGENT_MODE=1 SUFEN_TAVILY_API_KEY=sufen-tavily \
+uv run --python 3.11 python -c '<tool whitelist and memory scope probe>'
+```
+
+Result:
+
+```text
+tool-whitelist-ok ['mystand.archive.read', 'mystand.auth.resolve', 'mystand.event.draft', 'mystand.field_patch_draft', 'mystand.knowledge_graph.read', 'mystand_parse', 'sufen_memory_patch_draft', 'sufen_memory_search', 'web_extract', 'web_search']
+memory-scope-ok /var/lib/sufen-agent/memory/company-ZYJ/operators/1001/subjects/property/P-1/memory.json
+passed
+```
+
+This confirms `SUFEN_AGENT_MODE=1` exposes only the 10 SuFen first-release tools and does not expose `terminal`, `read_file`, `write_file`, `patch`, browser automation, `execute_code`, `delegate_task`, `cronjob`, or `computer_use`. It also confirms `sufen_memory_search` no longer exposes `memoryRoot` or `admin` in its schema and ignores those keys if a model attempts to pass them.
+
+## Brand And Secret Checks
+
+```bash
+uv run --python 3.11 python scripts/sufen_rebrand_check.py
+uv run --python 3.11 python scripts/sufen_secret_scan.py
+python -c 'import pathlib; legacy=("Her"+"mes").lower(); hits=[str(p) for p in pathlib.Path(".").rglob("*") if p.is_file() and legacy in p.read_text("utf-8", errors="ignore").lower()]; print(len(hits))'
+```
+
+Result:
+
+```text
+sufen-rebrand-check ok
+sufen-secret-scan ok
+old-brand search: 0 matches
+passed
+```
+
+## Fixes Verified
+
+- `sufen/` is now tracked in GitHub and imports successfully from a fresh clone.
+- `.gitignore` no longer excludes the `sufen/` package.
+- `uv run --python 3.11 python -m pip install -e ".[all]"` is reproducible because `pip==26.0.1` is pinned.
+- `uv run --python 3.11 pytest tests/sufen -q` is reproducible because the uv dev dependency group includes pytest.
+- `python -m pip wheel . --no-deps --no-build-isolation` is reproducible because the uv dev dependency group includes `setuptools==81.0.0`.
+- `sufen_memory_search` is scope-locked: no model-selected `memoryRoot`, no model-selected `admin` path.
+
+## Remaining Risk
+
+- The validated code commit is `64272336f4db4c45c500692dde20f72c56697519`. This report is updated after that validation run; any report-only commit after this point should not change runtime code.
+- Localhost server verification required sandbox escalation only because the sandbox blocks binding `127.0.0.1:8791` by default.
