@@ -165,6 +165,18 @@ def _serialize_tool_result(result: Any) -> str:
     return json.dumps(result, ensure_ascii=False, default=str)
 
 
+def _tool_result_payload(result: Any) -> dict[str, Any] | None:
+    if isinstance(result, dict):
+        return result
+    if isinstance(result, str):
+        try:
+            parsed = json.loads(result)
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+    return None
+
+
 def _tool_call_id(tool_call: dict[str, Any], index: int) -> str:
     return str(tool_call.get("id") or f"call_{index}")
 
@@ -185,14 +197,66 @@ def _tool_call_name_and_args(tool_call: dict[str, Any]) -> tuple[str, dict[str, 
     return name, args
 
 
-def _dispatch_tool_call(tool_call: dict[str, Any], index: int) -> tuple[dict[str, Any], ToolAuditItem]:
+def _task_scope(task: SuFenTaskPackage) -> dict[str, str]:
+    archive = task.archiveContext or {}
+    return {
+        "companyId": str(archive.get("companyId") or "company-ZYJ"),
+        "operatorUserId": task.operator.userId,
+        "subjectType": task.subject.type,
+        "subjectId": task.subject.id,
+    }
+
+
+def _task_bound_tool_args(name: str, args: dict[str, Any], task: SuFenTaskPackage) -> dict[str, Any]:
+    clean = dict(args)
+    if name in {"mystand.archive.read", "mystand.knowledge_graph.read"}:
+        clean.pop("authorizedPayload", None)
+    if name in {"sufen_memory_search", "sufen_memory_patch_draft"}:
+        scope = _task_scope(task)
+        for key, expected in scope.items():
+            if key in clean and clean.get(key) not in (None, "", expected):
+                raise ProviderError(f"task scope mismatch for {key}")
+            clean.pop(key, None)
+        nested = clean.get("scope")
+        if isinstance(nested, dict):
+            for key, expected in scope.items():
+                if key in nested and nested.get(key) not in (None, "", expected):
+                    raise ProviderError(f"task scope mismatch for scope.{key}")
+        clean.pop("scope", None)
+        clean.pop("memoryRoot", None)
+        clean.pop("admin", None)
+    for key in (
+        "authorizedPayload",
+        "companyId",
+        "operatorUserId",
+        "subjectType",
+        "subjectId",
+        "archiveContext",
+        "knowledgeGraphRefs",
+        "scopedMemoryKey",
+        "scope",
+    ):
+        if key in clean:
+            raise ProviderError(f"model supplied task-bound field: {key}")
+    return clean
+
+
+def _dispatch_tool_call(
+    tool_call: dict[str, Any],
+    index: int,
+    task: SuFenTaskPackage,
+) -> tuple[dict[str, Any], ToolAuditItem]:
     name, args = _tool_call_name_and_args(tool_call)
     if name not in SUFEN_TOOL_NAMES:
         raise ProviderError(f"unauthorized tool call: {name or '<missing>'}")
 
     from tools.registry import registry
 
-    result = registry.dispatch(name, args)
+    result = registry.dispatch(name, _task_bound_tool_args(name, args, task), task_package=task)
+    result_payload = _tool_result_payload(result)
+    if result_payload and result_payload.get("ok") is False:
+        reason = result_payload.get("reason") or result_payload.get("status") or "tool_failed_closed"
+        raise ProviderError(f"{name} failed closed: {reason}")
     tool_message = {
         "role": "tool",
         "tool_call_id": _tool_call_id(tool_call, index),
@@ -290,7 +354,7 @@ def answer_with_provider(
         messages.append(_assistant_tool_call_message(message))
         try:
             for index, tool_call in enumerate(tool_calls):
-                tool_message, audit = _dispatch_tool_call(tool_call, index)
+                tool_message, audit = _dispatch_tool_call(tool_call, index, task)
                 messages.append(tool_message)
                 loop_audit.append(audit)
         except ProviderError as exc:

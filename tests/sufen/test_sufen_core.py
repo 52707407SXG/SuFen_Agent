@@ -46,9 +46,16 @@ def _property_task(**updates):
         "scene": "房源维护",
         "archiveContext": {
             "companyId": "company-ZYJ",
+            "authorizationId": "AUTH-P-1",
             "baseInfo": {"title": "阳光花园三居", "askingPrice": "480万"},
             "propertyNote": "业主说先按原价挂一周。",
             "eventSummary": ["近三天有两组看房但无明确报价"],
+            "knowledgeGraphs": {
+                "KGREF-property-maintenance": {
+                    "name": "房源维护知识图谱",
+                    "focus": "业主维护、价格弹性、带看反馈",
+                }
+            },
         },
         "brokerProfile": {"capabilityStage": "新手"},
         "knowledgeGraphRefs": ["KGREF-property-maintenance"],
@@ -220,21 +227,59 @@ def test_sufen_memory_search_scope_rejects_model_selected_root_and_admin(monkeyp
 
     schema = registry.get_schema("sufen_memory_search")
     properties = schema["parameters"]["properties"]
+    assert set(properties) == {"query"}
+    assert "companyId" not in properties
+    assert "operatorUserId" not in properties
+    assert "subjectType" not in properties
+    assert "subjectId" not in properties
     assert "memoryRoot" not in properties
     assert "admin" not in properties
 
+    task = SuFenTaskPackage.model_validate(_property_task())
     result = registry.dispatch("sufen_memory_search", {
-        "companyId": "company-ZYJ",
-        "operatorUserId": "1001",
-        "subjectType": "property",
-        "subjectId": "P-1",
         "query": "底价",
         "memoryRoot": "/tmp/model-selected-root",
         "admin": True,
-    })
+    }, task_package=task)
     assert "/tmp/model-selected-root" not in result["path"]
     assert "/admin/" not in result["path"]
     assert "/operators/1001/subjects/property/P-1/memory.json" in result["path"]
+
+    cross_scope = registry.dispatch("sufen_memory_search", {
+        "query": "底价",
+        "operatorUserId": "1002",
+        "subjectId": "P-OTHER",
+    }, task_package=task)
+    assert cross_scope["ok"] is False
+    assert "memory_scope_mismatch" in cross_scope["reason"]
+
+
+def test_sufen_task_bound_tool_schemas_hide_authority_fields():
+    archive_props = registry.get_schema("mystand.archive.read")["parameters"]["properties"]
+    kg_props = registry.get_schema("mystand.knowledge_graph.read")["parameters"]["properties"]
+    memory_props = registry.get_schema("sufen_memory_search")["parameters"]["properties"]
+    memory_patch_props = registry.get_schema("sufen_memory_patch_draft")["parameters"]["properties"]
+
+    assert set(archive_props) == {"authorizationId"}
+    assert set(kg_props) == {"knowledgeGraphRef"}
+    assert set(memory_props) == {"query"}
+    assert set(memory_patch_props) == {"patch"}
+
+    hidden = {
+        "authorizedPayload",
+        "companyId",
+        "operatorUserId",
+        "subjectType",
+        "subjectId",
+        "archiveContext",
+        "knowledgeGraphRefs",
+        "scopedMemoryKey",
+        "memoryRoot",
+        "admin",
+        "scope",
+    }
+    for props in (archive_props, kg_props, memory_props, memory_patch_props):
+        assert not hidden.intersection(props)
 
 
 def test_sufen_web_tools_use_sufen_tavily_key(monkeypatch):
@@ -671,6 +716,268 @@ def test_provider_tool_call_loop_executes_whitelist_tool(monkeypatch):
     assert len(calls) == 2
     assert any(item.tool == "mystand_parse" and item.action == "provider_tool_call" for item in response.toolAudit)
     assert any(item.tool == "provider.chat_completions" for item in response.toolAudit)
+
+
+def test_provider_tool_call_uses_task_bound_memory_archive_and_kg(monkeypatch):
+    clear_delegation_nonce_cache()
+    monkeypatch.setenv("SUFEN_PROVIDER_API_KEY", "provider-key")
+    monkeypatch.setenv("SUFEN_DELEGATION_HMAC_SECRET", DELEGATION_SECRET)
+    monkeypatch.setenv("SUFEN_BASE_URL", "https://provider.test/v1")
+    monkeypatch.setenv("SUFEN_TAVILY_API_KEY", "sufen-tavily")
+
+    import sufen.provider as provider
+
+    calls = []
+
+    def fake_post(_url, _headers, payload):
+        calls.append(payload)
+        if len(calls) == 1:
+            return {
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call-memory",
+                                "type": "function",
+                                "function": {
+                                    "name": "sufen_memory_search",
+                                    "arguments": json.dumps({"query": "底价"}),
+                                },
+                            },
+                            {
+                                "id": "call-archive",
+                                "type": "function",
+                                "function": {
+                                    "name": "mystand.archive.read",
+                                    "arguments": json.dumps({"authorizationId": "AUTH-P-1"}),
+                                },
+                            },
+                            {
+                                "id": "call-kg",
+                                "type": "function",
+                                "function": {
+                                    "name": "mystand.knowledge_graph.read",
+                                    "arguments": json.dumps({"knowledgeGraphRef": "KGREF-property-maintenance"}),
+                                },
+                            },
+                        ],
+                    }
+                }]
+            }
+
+        tool_messages = {message["name"]: json.loads(message["content"]) for message in payload["messages"] if message["role"] == "tool"}
+        assert "/operators/1001/subjects/property/P-1/memory.json" in tool_messages["sufen_memory_search"]["path"]
+        assert "/operators/1002/" not in tool_messages["sufen_memory_search"]["path"]
+        assert "P-OTHER" not in tool_messages["sufen_memory_search"]["path"]
+        assert tool_messages["mystand.archive.read"]["archive"]["baseInfo"]["title"] == "阳光花园三居"
+        assert tool_messages["mystand.knowledge_graph.read"]["graph"]["name"] == "房源维护知识图谱"
+        content = {
+            "answer": "task-bound tools ok",
+            "evidenceUsed": [],
+            "missingAuthorizationRequests": [],
+            "eventDrafts": [],
+            "fieldPatchDrafts": [],
+            "memoryPatch": None,
+            "toolAudit": [],
+        }
+        return {"choices": [{"message": {"content": json.dumps(content, ensure_ascii=False)}}]}
+
+    monkeypatch.setattr(provider, "_post_chat_completions", fake_post)
+    delegation = _signed_delegation_token(nonce="nonce-task-bound-tools")
+    task = SuFenTaskPackage.model_validate(_property_task(delegationToken=delegation.model_dump()))
+    response = answer_sufen("AUTH-P-1 KGREF-property-maintenance", task=task, settings=load_settings())
+
+    assert response.answer == "task-bound tools ok"
+    assert len(calls) == 2
+    assert {item.tool for item in response.toolAudit} >= {
+        "sufen_memory_search",
+        "mystand.archive.read",
+        "mystand.knowledge_graph.read",
+    }
+
+
+def test_provider_tool_call_memory_search_cross_scope_fails_closed(monkeypatch):
+    clear_delegation_nonce_cache()
+    monkeypatch.setenv("SUFEN_PROVIDER_API_KEY", "provider-key")
+    monkeypatch.setenv("SUFEN_DELEGATION_HMAC_SECRET", DELEGATION_SECRET)
+    monkeypatch.setenv("SUFEN_BASE_URL", "https://provider.test/v1")
+    monkeypatch.setenv("SUFEN_TAVILY_API_KEY", "sufen-tavily")
+
+    import sufen.provider as provider
+
+    calls = []
+
+    def fake_post(_url, _headers, payload):
+        calls.append(payload)
+        return {
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [{
+                        "id": "call-cross-memory",
+                        "type": "function",
+                        "function": {
+                            "name": "sufen_memory_search",
+                            "arguments": json.dumps({
+                                "query": "底价",
+                                "operatorUserId": "1002",
+                                "subjectId": "P-OTHER",
+                            }),
+                        },
+                    }],
+                }
+            }]
+        }
+
+    monkeypatch.setattr(provider, "_post_chat_completions", fake_post)
+    delegation = _signed_delegation_token(nonce="nonce-cross-memory")
+    task = SuFenTaskPackage.model_validate(_property_task(delegationToken=delegation.model_dump()))
+    response = answer_sufen("AUTH-P-1", task=task, settings=load_settings())
+
+    assert len(calls) == 1
+    assert response.answer == FAIL_CLOSED_MESSAGE
+    assert response.missingAuthorizationRequests[0].reason == "unauthorized_tool_call"
+    assert "task scope mismatch" in response.toolAudit[0].status
+
+
+def test_provider_tool_call_archive_read_ignores_forged_authorized_payload(monkeypatch):
+    clear_delegation_nonce_cache()
+    monkeypatch.setenv("SUFEN_PROVIDER_API_KEY", "provider-key")
+    monkeypatch.setenv("SUFEN_DELEGATION_HMAC_SECRET", DELEGATION_SECRET)
+    monkeypatch.setenv("SUFEN_BASE_URL", "https://provider.test/v1")
+    monkeypatch.setenv("SUFEN_TAVILY_API_KEY", "sufen-tavily")
+
+    import sufen.provider as provider
+
+    calls = []
+
+    def fake_post(_url, _headers, payload):
+        calls.append(payload)
+        if len(calls) == 1:
+            return {
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [{
+                            "id": "call-archive-forged",
+                            "type": "function",
+                            "function": {
+                                "name": "mystand.archive.read",
+                                "arguments": json.dumps({
+                                    "authorizationId": "AUTH-P-1",
+                                    "authorizedPayload": {"title": "模型伪造资料", "forged": True},
+                                }),
+                            },
+                        }],
+                    }
+                }]
+            }
+        tool_content = next(message["content"] for message in payload["messages"] if message.get("name") == "mystand.archive.read")
+        assert "模型伪造资料" not in tool_content
+        assert "forged" not in tool_content
+        assert "阳光花园三居" in tool_content
+        content = {
+            "answer": "archive payload ignored",
+            "evidenceUsed": [],
+            "missingAuthorizationRequests": [],
+            "eventDrafts": [],
+            "fieldPatchDrafts": [],
+            "memoryPatch": None,
+            "toolAudit": [],
+        }
+        return {"choices": [{"message": {"content": json.dumps(content, ensure_ascii=False)}}]}
+
+    monkeypatch.setattr(provider, "_post_chat_completions", fake_post)
+    delegation = _signed_delegation_token(nonce="nonce-forged-archive")
+    task = SuFenTaskPackage.model_validate(_property_task(delegationToken=delegation.model_dump()))
+    response = answer_sufen("AUTH-P-1", task=task, settings=load_settings())
+
+    assert response.answer == "archive payload ignored"
+    assert len(calls) == 2
+
+
+def test_provider_tool_call_archive_read_rejects_non_task_ref(monkeypatch):
+    clear_delegation_nonce_cache()
+    monkeypatch.setenv("SUFEN_PROVIDER_API_KEY", "provider-key")
+    monkeypatch.setenv("SUFEN_DELEGATION_HMAC_SECRET", DELEGATION_SECRET)
+    monkeypatch.setenv("SUFEN_BASE_URL", "https://provider.test/v1")
+    monkeypatch.setenv("SUFEN_TAVILY_API_KEY", "sufen-tavily")
+
+    import sufen.provider as provider
+
+    calls = []
+
+    def fake_post(_url, _headers, payload):
+        calls.append(payload)
+        return {
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [{
+                        "id": "call-archive-other",
+                        "type": "function",
+                        "function": {
+                            "name": "mystand.archive.read",
+                            "arguments": json.dumps({"authorizationId": "AUTH-P-OTHER"}),
+                        },
+                    }],
+                }
+            }]
+        }
+
+    monkeypatch.setattr(provider, "_post_chat_completions", fake_post)
+    delegation = _signed_delegation_token(nonce="nonce-archive-other")
+    task = SuFenTaskPackage.model_validate(_property_task(delegationToken=delegation.model_dump()))
+    response = answer_sufen("AUTH-P-1", task=task, settings=load_settings())
+
+    assert len(calls) == 1
+    assert response.answer == FAIL_CLOSED_MESSAGE
+    assert "unauthorized_archive_ref" in response.toolAudit[0].status
+
+
+def test_provider_tool_call_knowledge_graph_rejects_non_task_ref(monkeypatch):
+    clear_delegation_nonce_cache()
+    monkeypatch.setenv("SUFEN_PROVIDER_API_KEY", "provider-key")
+    monkeypatch.setenv("SUFEN_DELEGATION_HMAC_SECRET", DELEGATION_SECRET)
+    monkeypatch.setenv("SUFEN_BASE_URL", "https://provider.test/v1")
+    monkeypatch.setenv("SUFEN_TAVILY_API_KEY", "sufen-tavily")
+
+    import sufen.provider as provider
+
+    calls = []
+
+    def fake_post(_url, _headers, payload):
+        calls.append(payload)
+        return {
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [{
+                        "id": "call-kg-other",
+                        "type": "function",
+                        "function": {
+                            "name": "mystand.knowledge_graph.read",
+                            "arguments": json.dumps({"knowledgeGraphRef": "KGREF-other"}),
+                        },
+                    }],
+                }
+            }]
+        }
+
+    monkeypatch.setattr(provider, "_post_chat_completions", fake_post)
+    delegation = _signed_delegation_token(nonce="nonce-kg-other")
+    task = SuFenTaskPackage.model_validate(_property_task(delegationToken=delegation.model_dump()))
+    response = answer_sufen("AUTH-P-1 KGREF-property-maintenance", task=task, settings=load_settings())
+
+    assert len(calls) == 1
+    assert response.answer == FAIL_CLOSED_MESSAGE
+    assert "unauthorized_knowledge_graph_ref" in response.toolAudit[0].status
 
 
 def test_provider_tool_call_loop_rejects_non_whitelist_tool(monkeypatch):
