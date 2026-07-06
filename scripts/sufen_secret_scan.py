@@ -35,6 +35,8 @@ SURFACE_PATHS = [
     "package.json",
     "sufen",
     "tools/sufen_mystand_tools.py",
+    "scripts/check_sufen_dialogue_live.py",
+    "scripts/check_sufen_dialogue_policy.py",
     "scripts/sufen_rebrand_check.py",
     "scripts/sufen_secret_scan.py",
     "tests/sufen",

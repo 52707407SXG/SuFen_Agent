@@ -15,6 +15,7 @@ from sufen.config import SuFenSettings, load_settings
 from sufen.output import AuthorizationRequest, EvidenceItem, MemoryPatch, SuFenResponse, ToolAuditItem
 from sufen.prompt.identity import build_sufen_identity_block
 from sufen.task_package import SuFenTaskPackage, ensure_safe_actions
+from sufen.time import now as sufen_now
 from toolsets import SUFEN_TOOL_NAMES
 
 
@@ -117,6 +118,49 @@ def _normalize_evidence_item(item: Any, index: int) -> dict[str, Any]:
     }
 
 
+def _normalize_authorization_request(item: Any, index: int) -> dict[str, Any]:
+    if not isinstance(item, dict):
+        text = str(item).strip()
+        return {
+            "reason": f"provider.missing_authorization.{index}",
+            "acceptableRefs": [],
+            "message": text or FAIL_CLOSED_MESSAGE,
+        }
+    reason = _first_present_text(item, (
+        "reason",
+        "type",
+        "kind",
+        "source",
+        "authorizationId",
+        "referenceId",
+        "refId",
+        "id",
+        "title",
+        "name",
+    )) or f"provider.missing_authorization.{index}"
+    message = _first_present_text(item, (
+        "message",
+        "description",
+        "summary",
+        "detail",
+        "content",
+        "text",
+        "note",
+    )) or reason
+    refs = item.get("acceptableRefs")
+    if not isinstance(refs, list):
+        refs = item.get("refs") if isinstance(item.get("refs"), list) else []
+    single_ref = _first_present_text(item, ("authorizationId", "referenceId", "refId", "id", "ref"))
+    acceptable_refs = [str(ref).strip() for ref in refs if str(ref).strip()]
+    if single_ref and single_ref not in acceptable_refs:
+        acceptable_refs.append(single_ref)
+    return {
+        "reason": reason[:200],
+        "acceptableRefs": acceptable_refs[:12],
+        "message": message[:1200],
+    }
+
+
 def _normalize_tool_audit_item(item: Any, index: int) -> dict[str, Any]:
     if not isinstance(item, dict):
         return {
@@ -211,6 +255,11 @@ def _normalize_provider_response_payload(payload: dict[str, Any]) -> dict[str, A
         clean["evidenceUsed"] = [
             _normalize_evidence_item(item, index)
             for index, item in enumerate(clean["evidenceUsed"])
+        ]
+    if isinstance(clean.get("missingAuthorizationRequests"), list):
+        clean["missingAuthorizationRequests"] = [
+            _normalize_authorization_request(item, index)
+            for index, item in enumerate(clean["missingAuthorizationRequests"])
         ]
     if isinstance(clean.get("toolAudit"), list):
         clean["toolAudit"] = [
@@ -324,6 +373,32 @@ def _authorized_context_card(task: SuFenTaskPackage) -> str:
     )
 
 
+def _runtime_anchor_card(task: SuFenTaskPackage) -> str:
+    current_time = sufen_now()
+    archive_context = task.archiveContext or {}
+    operator = task.operator.model_dump(mode="json")
+    subject = task.subject.model_dump(mode="json")
+    anchor = {
+        "currentSufenTime": current_time.isoformat(),
+        "timezone": str(current_time.tzinfo or "Asia/Shanghai"),
+        "scene": task.scene,
+        "operator": operator,
+        "subject": subject,
+        "subjectRelationHint": archive_context.get("subjectRelationHint"),
+        "module": archive_context.get("module") or archive_context.get("moduleName"),
+        "contextLoadPlanVersion": (archive_context.get("contextLoadPlan") or {}).get("version")
+        if isinstance(archive_context.get("contextLoadPlan"), dict)
+        else None,
+    }
+    return (
+        "本轮 SuFen 执行锚点：回答前先识别操作者、当前模块、当前档案对象、操作者与档案对象关系、"
+        "北京时间和真实意图；目标不清时轻轻确认，目标清楚时直接判断；按需读取最小充分资料，"
+        "不得默认全量扫描、不得默认读取结算卡/财务明细/点没点结算、不得把未 loaded 资料当成已读；"
+        "闲聊可以自然聊，但要有边界，不做话痨，也不压迫用户进入业务。\n"
+        + json.dumps(anchor, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    )
+
+
 def _system_message(task: SuFenTaskPackage) -> str:
     scope = {
         "companyId": task.archiveContext.get("companyId", "company-ZYJ"),
@@ -353,8 +428,9 @@ def _system_message(task: SuFenTaskPackage) -> str:
         + json.dumps(PROVIDER_TOOL_NAME_BY_INTERNAL, ensure_ascii=False, sort_keys=True),
         "scoped memory 只能使用 My Stand taskPackage 锁定的范围，模型不得自选 memoryRoot，不得切换 admin 路径："
         + json.dumps(scope, ensure_ascii=False, sort_keys=True),
+        _runtime_anchor_card(task),
         "My Stand taskPackage.archiveContext.archive、archiveContext.broker、archiveContext.archiveRows、archiveSummary、parserToolResults、referenceContext 和 systemFoundationContext 是后端已按权限注入的当前可读资料；只要这些字段里已有当前档案资料，必须直接读取并据此回答，不得因为用户没有额外粘贴 AUTH/OUT/KGREF 就说当前档案缺资料。",
-        "必须遵守 taskPackage.archiveContext.contextLoadPlan：先用 loaded 层轻量回应或追问，目标明确后再按触发条件展开特征卡、房源笔记、图片/OCR、知识图谱等未加载层；未标记 loaded 的资料不得假装已读。",
+        "必须遵守 taskPackage.archiveContext.contextLoadPlan：先用 loaded 层轻量回应或确认意图，目标明确后再按触发条件展开特征卡、房源笔记、图片/OCR、知识图谱等未加载层；未标记 loaded 的资料不得假装已读。",
         _authorized_context_card(task),
         "所有事件、字段修改、记忆修改都只能作为 draft 返回，不能直接写正式数据。",
     ])

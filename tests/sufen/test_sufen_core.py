@@ -544,6 +544,20 @@ def test_sufen_policy_enters_actual_system_prompt(monkeypatch):
     monkeypatch.setattr(system_prompt, "_ra", lambda: _RuntimeStub)
     parts = build_system_prompt_parts(_AgentStub())
     assert "你是 SuFen" in parts["stable"]
+    assert "中文名：素分" in parts["stable"]
+    assert "最高原则：会聊天的业务军师" in parts["stable"]
+    assert "识别场景 -> 判断关系 -> 判断真实意图 -> 选择必要资料" in parts["stable"]
+    assert "角色感、空间感、时间感" in parts["stable"]
+    assert "操作者和档案对象不同时" in parts["stable"]
+    assert "操作者和档案对象相同时" in parts["stable"]
+    assert "按北京时间 `Asia/Shanghai`" in parts["stable"]
+    assert "意图判断和对话节奏" in parts["stable"]
+    assert "按需资料选择" in parts["stable"]
+    assert "不默认全量扫描" in parts["stable"]
+    assert "不得默认读取结算卡" in parts["stable"]
+    assert "签二手" in parts["stable"]
+    assert "出房源" in parts["stable"]
+    assert "省心租" in parts["stable"]
     assert "资料优先" in parts["stable"]
     assert "分层加载顺序" in parts["stable"]
     assert "contextLoadPlan" in parts["stable"]
@@ -561,6 +575,10 @@ def test_sufen_policy_builds_without_inherited_runtime(monkeypatch):
     monkeypatch.setenv("SUFEN_AGENT_MODE", "1")
     parts = build_system_prompt_parts(_AgentStub())
     assert "你是 SuFen" in parts["stable"]
+    assert "SuFen 是 My Stand 里的深层业务军师" in parts["stable"]
+    assert "不是报表机" in parts["stable"]
+    assert "不能连续审问" in parts["stable"]
+    assert "不做话痨" in parts["stable"]
     assert "资料优先" in parts["stable"]
     assert "实际 LLM 请求的 system message" in parts["stable"]
     assert "Markdown" in parts["stable"]
@@ -578,8 +596,24 @@ def test_provider_system_message_allows_markdown_inside_answer():
     assert "代码围栏" in system_message
     assert "taskPackage.archiveContext.archive" in system_message
     assert "不得因为用户没有额外粘贴" in system_message
+    assert "本轮 SuFen 执行锚点" in system_message
+    assert "currentSufenTime" in system_message
+    assert "Asia/Shanghai" in system_message
+    assert "回答前先识别操作者" in system_message
+    assert "不得默认全量扫描" in system_message
+    assert "不得默认读取结算卡" in system_message
+    assert "不做话痨" in system_message
     assert "contextLoadPlan" in system_message
     assert "未标记 loaded 的资料不得假装已读" in system_message
+
+
+def test_sufen_time_defaults_to_beijing(monkeypatch):
+    import sufen.time as sufen_time
+
+    monkeypatch.delenv("SUFEN_TIMEZONE", raising=False)
+    sufen_time.reset_cache()
+    current = sufen_time.now()
+    assert str(current.tzinfo) == "Asia/Shanghai"
 
 
 def test_sufen_policy_reaches_chat_completion_request_system_message(monkeypatch):
@@ -972,6 +1006,39 @@ def test_provider_normalizes_model_evidence_shape(monkeypatch):
     assert response.answer == "normalized evidence answer"
     assert response.evidenceUsed[0].source == "AUTH-P-1"
     assert response.evidenceUsed[0].summary == "客户预算和区域明确"
+
+
+def test_provider_normalizes_missing_authorization_shape(monkeypatch):
+    clear_delegation_nonce_cache()
+    monkeypatch.setenv("SUFEN_PROVIDER_API_KEY", "provider-key")
+    monkeypatch.setenv("SUFEN_DELEGATION_HMAC_SECRET", DELEGATION_SECRET)
+    monkeypatch.setenv("SUFEN_BASE_URL", "https://provider.test/v1")
+    monkeypatch.setenv("SUFEN_TAVILY_API_KEY", "sufen-tavily")
+
+    import sufen.provider as provider
+
+    def fake_post(_url, _headers, _payload):
+        content = {
+            "answer": "结算需要单独授权后再核对。",
+            "evidenceUsed": [],
+            "missingAuthorizationRequests": [{
+                "type": "settlement_card",
+                "description": "需要结算卡权限后再做财务确认。",
+            }],
+            "eventDrafts": [],
+            "fieldPatchDrafts": [],
+            "memoryPatch": None,
+            "toolAudit": [],
+        }
+        return {"choices": [{"message": {"content": json.dumps(content, ensure_ascii=False)}}]}
+
+    monkeypatch.setattr(provider, "_post_chat_completions", fake_post)
+    delegation = _signed_delegation_token(nonce="nonce-normalize-missing-auth")
+    task = SuFenTaskPackage.model_validate(_property_task(delegationToken=delegation.model_dump()))
+    response = answer_sufen("明确问结算卡时缺权限怎么办", task=task, settings=load_settings())
+
+    assert response.missingAuthorizationRequests[0].reason == "settlement_card"
+    assert response.missingAuthorizationRequests[0].message == "需要结算卡权限后再做财务确认。"
 
 
 def test_provider_normalizes_draft_and_audit_shapes(monkeypatch):

@@ -23,7 +23,7 @@ _cache_resolved = False
 def _resolve_timezone_name() -> str:
     """Read the configured IANA timezone string, if one is set."""
 
-    return os.getenv("SUFEN_TIMEZONE", "").strip()
+    return os.getenv("SUFEN_TIMEZONE", "Asia/Shanghai").strip()
 
 
 def _get_zoneinfo(name: str) -> Optional[ZoneInfo]:
