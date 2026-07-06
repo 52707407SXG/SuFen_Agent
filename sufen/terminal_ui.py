@@ -22,60 +22,33 @@ TEXT = "\033[38;2;232;226;214m"
 ACCENT = "\033[1;38;2;225;171;92m"
 
 PIXEL_COLORS = {
-    "W": "\033[38;2;239;232;216m",  # outline
-    "H": "\033[38;2;72;42;36m",     # dark head cloth
-    "G": "\033[38;2;205;144;65m",    # gold thread
-    "S": "\033[38;2;212;139;96m",    # skin
-    "s": "\033[38;2;170;93;65m",     # skin shadow
-    "E": "\033[38;2;238;237;213m",   # glowing eyes
-    "T": "\033[38;2;98;62;52m",      # nose/mouth
-    "M": "\033[38;2;156;160;156m",   # moustache
-    "B": "\033[38;2;205;210;202m",   # beard
-    "N": "\033[38;2;24;31;48m",      # navy robe
-    "F": "\033[38;2;183;118;55m",    # feather fan
-    "f": "\033[38;2;109;70;44m",     # fan rib
-    ".": "\033[38;2;124;120;116m",   # robe ornament
+    "A": "\033[38;2;239;232;216m",
+    "G": "\033[38;2;205;144;65m",
+    "Y": "\033[38;2;235;198;118m",
+    "D": "\033[38;2;58;54;62m",
 }
 
 PIXEL_GLYPHS = {
-    "W": "█",
-    "H": "█",
+    "A": "█",
     "G": "▓",
-    "S": "█",
-    "s": "▓",
-    "E": "◆",
-    "T": "▓",
-    "M": "▒",
-    "B": "█",
-    "N": "█",
-    "F": "▓",
-    "f": "▒",
-    ".": "·",
+    "Y": "▒",
+    "D": "░",
 }
 
-PORTRAIT_PIXELS = [
-    "             WWWWWW             ",
-    "          WWHHHHHHHHWW          ",
-    "        WWHHHGGGGHHHHWW         ",
-    "       WHHHGGGGGGGGHHHW         ",
-    "      WHHHHHHHHHHHHHHHHW        ",
-    "      WHHHGGHHHHHHGGHHHW        ",
-    "       WWHHHSSSSSSHHHWW         ",
-    "        WSSSSSSSSSSSSW          ",
-    "        WssSEEESSEEEsW          ",
-    "        WSSSSEEEESSSSW          ",
-    "         WSSSSTTSSSSW           ",
-    "          WSSSTTTSSW            ",
-    "          WBMMMMMMBW            ",
-    "         WBBMMMMMMBBW           ",
-    "       WNBBBBBBBBBBBBNW         ",
-    "      WNNNBBBBBBBBBBNNNW        ",
-    "     WNNNNNNN..GG..NNNNNW       ",
-    "    WNNNNNNNN..GG..NNNNNNW      ",
-    "      WFFFFFFFFFFFFFFFFW         ",
-    "     WFFfFFfFFfFFfFFfFFFW       ",
-    "    WFFFFfFFFFfFFFFfFFFFW       ",
-    "   WFFFFFFFFFFFFFFFFFFFFFW       ",
+LOGO_PIXELS = [
+    "       AAAAAAA  AAAAAAA       ",
+    "      AA       AA             ",
+    "      AA       AA             ",
+    "      AAAAAA   AAAAA          ",
+    "          AA   AA             ",
+    "          AA   AA             ",
+    "      AAAAAA   AA             ",
+    "                               ",
+    "         GGGGGGGGGGGG          ",
+    "      GGGYYYYYYYYYYGGG         ",
+    "     GGYYDDDDDDDDDDYYGG        ",
+    "      GGGYYYYYYYYYYGGG         ",
+    "         GGGGGGGGGGGG          ",
 ]
 
 TAGLINE = "My Stand SuFen Agent"
@@ -173,7 +146,7 @@ def print_startup_card(settings: SuFenSettings) -> None:
             _center_cell("Welcome back!", left_width, color=TEXT, enabled=color_enabled),
             _center_cell(TAGLINE, left_width, color=GOLD, enabled=color_enabled),
             _plain_cell("", left_width, enabled=color_enabled),
-            *[_pixel_line(line, left_width, enabled=color_enabled) for line in PORTRAIT_PIXELS],
+            *[_pixel_line(line, left_width, enabled=color_enabled) for line in LOGO_PIXELS],
             _plain_cell("", left_width, enabled=color_enabled),
             _center_cell(model_line, left_width, color=ACCENT, enabled=color_enabled),
             _center_cell(_clip(cwd, left_width), left_width, color=MUTED, enabled=color_enabled),
@@ -204,7 +177,7 @@ def print_startup_card(settings: SuFenSettings) -> None:
         print(_color("╭─ " + _clip(f"SuFen v{__version__}", max(1, body - 4)) + " " + ("─" * max(0, body - len(f"SuFen v{__version__}") - 3)) + "╮", GOLD, enabled=color_enabled))
         print(_color("│", GOLD, enabled=color_enabled) + _center_cell("Welcome back!", body, color=TEXT, enabled=color_enabled) + _color("│", GOLD, enabled=color_enabled))
         print(_color("│", GOLD, enabled=color_enabled) + _center_cell(TAGLINE, body, color=GOLD, enabled=color_enabled) + _color("│", GOLD, enabled=color_enabled))
-        for line in PORTRAIT_PIXELS:
+        for line in LOGO_PIXELS:
             print(_color("│", GOLD, enabled=color_enabled) + _pixel_line(line, body, enabled=color_enabled) + _color("│", GOLD, enabled=color_enabled))
         print(_color("├" + ("─" * body) + "┤", GOLD, enabled=color_enabled))
         print(_color("│", GOLD, enabled=color_enabled) + _center_cell(model_line, body, color=ACCENT, enabled=color_enabled) + _color("│", GOLD, enabled=color_enabled))
