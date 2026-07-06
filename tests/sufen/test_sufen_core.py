@@ -71,7 +71,13 @@ def _signed_delegation_token(
         "actorAgent": "lucan",
         "operatorUserId": operator_user_id,
         "subject": subject or {"type": "property", "id": "P-1"},
-        "allowedActions": allowed_actions or ["analyze", "suggest"],
+        "allowedActions": allowed_actions or [
+            "analyze",
+            "suggest",
+            "eventDraft",
+            "fieldPatchDraft",
+            "memoryPatch",
+        ],
         "expiresAt": (expires_at or (datetime.now(timezone.utc) + timedelta(hours=1))).isoformat(),
         "nonce": nonce,
         "signature": "pending",
@@ -81,20 +87,28 @@ def _signed_delegation_token(
 
 def test_sufen_env_does_not_reuse_miner_key(monkeypatch):
     monkeypatch.delenv("SUFEN_API_KEY", raising=False)
+    monkeypatch.delenv("SUFEN_SERVICE_API_KEY", raising=False)
+    monkeypatch.delenv("SUFEN_PROVIDER_API_KEY", raising=False)
     monkeypatch.setenv("MYSTAND_MINER_API_KEY", "miner-secret")
     monkeypatch.setattr(sufen_config, "_candidate_env_files", lambda: [])
     settings = load_settings()
     assert settings.api_key == ""
+    assert settings.service_api_key == ""
+    assert settings.provider_api_key == ""
 
 
 def test_sufen_loads_local_dotenv_and_keeps_process_env_priority(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("SUFEN_API_KEY", raising=False)
+    monkeypatch.delenv("SUFEN_SERVICE_API_KEY", raising=False)
+    monkeypatch.delenv("SUFEN_PROVIDER_API_KEY", raising=False)
     monkeypatch.delenv("SUFEN_PORT", raising=False)
     monkeypatch.setattr(sufen_config, "_candidate_env_files", lambda: [tmp_path / ".env"])
     (tmp_path / ".env").write_text(
         "\n".join([
-            "SUFEN_API_KEY=from-dotenv",
+            "SUFEN_SERVICE_API_KEY=service-dotenv",
+            "SUFEN_PROVIDER_API_KEY=provider-dotenv",
+            "SUFEN_API_KEY=deprecated-dotenv",
             "SUFEN_PORT=8799",
             "MYSTAND_MINER_API_KEY=must-not-load",
         ]),
@@ -102,11 +116,25 @@ def test_sufen_loads_local_dotenv_and_keeps_process_env_priority(monkeypatch, tm
     )
 
     settings = load_settings()
-    assert settings.api_key == "from-dotenv"
+    assert settings.service_api_key == "service-dotenv"
+    assert settings.provider_api_key == "provider-dotenv"
+    assert settings.api_key == "deprecated-dotenv"
     assert settings.port == 8799
 
-    monkeypatch.setenv("SUFEN_API_KEY", "from-process-env")
-    assert load_settings().api_key == "from-process-env"
+    monkeypatch.setenv("SUFEN_PROVIDER_API_KEY", "provider-process")
+    assert load_settings().provider_api_key == "provider-process"
+
+
+def test_deprecated_sufen_api_key_fallback_is_explicit(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("SUFEN_SERVICE_API_KEY", raising=False)
+    monkeypatch.delenv("SUFEN_PROVIDER_API_KEY", raising=False)
+    monkeypatch.setenv("SUFEN_API_KEY", "fallback-key")
+    monkeypatch.setattr(sufen_config, "_candidate_env_files", lambda: [])
+    settings = load_settings()
+    assert settings.api_key == "fallback-key"
+    assert settings.service_api_key == "fallback-key"
+    assert settings.provider_api_key == "fallback-key"
 
 
 def test_authorization_refs_and_fail_closed():
@@ -542,9 +570,12 @@ def test_output_schema_and_fake_provider_with_task_package():
 
 
 def test_production_chat_uses_real_provider_not_fake(monkeypatch):
+    clear_delegation_nonce_cache()
     monkeypatch.setenv("SUFEN_PROVIDER", "deepseek")
     monkeypatch.setenv("SUFEN_MODEL", "deepseek-v4-pro")
-    monkeypatch.setenv("SUFEN_API_KEY", "provider-secret")
+    monkeypatch.setenv("SUFEN_SERVICE_API_KEY", "service-key")
+    monkeypatch.setenv("SUFEN_PROVIDER_API_KEY", "provider-key")
+    monkeypatch.setenv("SUFEN_DELEGATION_HMAC_SECRET", DELEGATION_SECRET)
     monkeypatch.setenv("SUFEN_BASE_URL", "https://provider.test/v1")
     monkeypatch.setenv("SUFEN_FAKE_PROVIDER", "0")
     monkeypatch.setenv("SUFEN_TAVILY_API_KEY", "sufen-tavily")
@@ -575,17 +606,133 @@ def test_production_chat_uses_real_provider_not_fake(monkeypatch):
     monkeypatch.setattr(fake_provider, "answer_with_fake_provider", fail_if_fake)
     monkeypatch.setattr(provider, "_post_chat_completions", fake_post)
 
-    task = SuFenTaskPackage.model_validate(_property_task())
+    delegation = _signed_delegation_token(nonce="nonce-provider-content")
+    task = SuFenTaskPackage.model_validate(_property_task(delegationToken=delegation.model_dump()))
     response = answer_sufen("AUTH-P-1 KGREF-property-maintenance", task=task, settings=load_settings())
 
     assert response.answer == "real provider answer"
     assert captured["url"] == "https://provider.test/v1/chat/completions"
-    assert captured["headers"]["Authorization"] == "Bearer provider-secret"
+    assert captured["headers"]["Authorization"] == "Bearer provider-key"
     assert "你是 SuFen" in captured["payload"]["messages"][0]["content"]
     assert "scoped memory" in captured["payload"]["messages"][0]["content"]
     exposed = {item["function"]["name"] for item in captured["payload"]["tools"]}
     assert exposed == set(SUFEN_TOOL_NAMES)
     assert any(item.tool == "provider.chat_completions" for item in response.toolAudit)
+
+
+def test_provider_tool_call_loop_executes_whitelist_tool(monkeypatch):
+    clear_delegation_nonce_cache()
+    monkeypatch.setenv("SUFEN_PROVIDER_API_KEY", "provider-key")
+    monkeypatch.setenv("SUFEN_DELEGATION_HMAC_SECRET", DELEGATION_SECRET)
+    monkeypatch.setenv("SUFEN_BASE_URL", "https://provider.test/v1")
+    monkeypatch.setenv("SUFEN_TAVILY_API_KEY", "sufen-tavily")
+
+    import sufen.provider as provider
+
+    calls = []
+
+    def fake_post(_url, _headers, payload):
+        calls.append(payload)
+        if len(calls) == 1:
+            return {
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [{
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {
+                                "name": "mystand_parse",
+                                "arguments": json.dumps({"text": "AUTH-P-1 KGREF-property-maintenance"}),
+                            },
+                        }],
+                    }
+                }]
+            }
+        assert any(message["role"] == "tool" and message["tool_call_id"] == "call-1" for message in payload["messages"])
+        content = {
+            "answer": "tool loop final answer",
+            "evidenceUsed": [],
+            "missingAuthorizationRequests": [],
+            "eventDrafts": [],
+            "fieldPatchDrafts": [],
+            "memoryPatch": None,
+            "toolAudit": [],
+        }
+        return {"choices": [{"message": {"content": json.dumps(content, ensure_ascii=False)}}]}
+
+    monkeypatch.setattr(provider, "_post_chat_completions", fake_post)
+    delegation = _signed_delegation_token(nonce="nonce-tool-loop")
+    task = SuFenTaskPackage.model_validate(_property_task(delegationToken=delegation.model_dump()))
+    response = answer_sufen("AUTH-P-1 KGREF-property-maintenance", task=task, settings=load_settings())
+
+    assert response.answer == "tool loop final answer"
+    assert len(calls) == 2
+    assert any(item.tool == "mystand_parse" and item.action == "provider_tool_call" for item in response.toolAudit)
+    assert any(item.tool == "provider.chat_completions" for item in response.toolAudit)
+
+
+def test_provider_tool_call_loop_rejects_non_whitelist_tool(monkeypatch):
+    clear_delegation_nonce_cache()
+    monkeypatch.setenv("SUFEN_PROVIDER_API_KEY", "provider-key")
+    monkeypatch.setenv("SUFEN_DELEGATION_HMAC_SECRET", DELEGATION_SECRET)
+    monkeypatch.setenv("SUFEN_BASE_URL", "https://provider.test/v1")
+    monkeypatch.setenv("SUFEN_TAVILY_API_KEY", "sufen-tavily")
+
+    import sufen.provider as provider
+
+    calls = []
+
+    def fake_post(_url, _headers, payload):
+        calls.append(payload)
+        return {
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [{
+                        "id": "call-bad",
+                        "type": "function",
+                        "function": {"name": "terminal", "arguments": "{}"},
+                    }],
+                }
+            }]
+        }
+
+    monkeypatch.setattr(provider, "_post_chat_completions", fake_post)
+    delegation = _signed_delegation_token(nonce="nonce-bad-tool")
+    task = SuFenTaskPackage.model_validate(_property_task(delegationToken=delegation.model_dump()))
+    response = answer_sufen("AUTH-P-1", task=task, settings=load_settings())
+
+    assert len(calls) == 1
+    assert response.answer == FAIL_CLOSED_MESSAGE
+    assert response.missingAuthorizationRequests[0].reason == "unauthorized_tool_call"
+    assert "terminal" in response.toolAudit[0].status
+
+
+def test_production_mode_requires_delegation_token_before_provider(monkeypatch):
+    monkeypatch.setenv("SUFEN_PROVIDER_API_KEY", "provider-key")
+    monkeypatch.setenv("SUFEN_DELEGATION_HMAC_SECRET", DELEGATION_SECRET)
+    monkeypatch.setenv("SUFEN_BASE_URL", "https://provider.test/v1")
+
+    import sufen.provider as provider
+
+    called = {"provider": False}
+
+    def fail_if_called(*_args, **_kwargs):
+        called["provider"] = True
+        raise AssertionError("provider must not be called without delegationToken")
+
+    monkeypatch.setattr(provider, "_post_chat_completions", fail_if_called)
+    task = SuFenTaskPackage.model_validate(_property_task())
+    try:
+        answer_sufen("AUTH-P-1", task=task, settings=load_settings())
+    except ValueError as exc:
+        assert "delegation token" in str(exc)
+    else:
+        raise AssertionError("production task without delegationToken must fail closed before provider")
+    assert called["provider"] is False
 
 
 def test_first_property_archive_scenario_outputs_drafts_and_memory_patch():
@@ -744,10 +891,10 @@ def test_delegation_token_security_checks():
 def test_health_and_fake_chat_smoke(monkeypatch):
     monkeypatch.setenv("SUFEN_PROVIDER", "deepseek")
     monkeypatch.setenv("SUFEN_MODEL", "deepseek-v4-pro")
-    monkeypatch.setenv("SUFEN_API_KEY", "server-secret")
+    monkeypatch.setenv("SUFEN_SERVICE_API_KEY", "service-key")
     monkeypatch.setenv("SUFEN_FAKE_PROVIDER", "1")
     client = TestClient(create_app())
-    headers = {"Authorization": "Bearer server-secret"}
+    headers = {"Authorization": "Bearer service-key"}
     health = client.get("/health")
     assert health.status_code == 200
     assert health.json()["service"] == "sufen-agent"
@@ -793,7 +940,8 @@ def test_health_and_fake_chat_smoke(monkeypatch):
 
 
 def test_http_chat_requires_service_api_key(monkeypatch):
-    monkeypatch.setenv("SUFEN_API_KEY", "server-secret")
+    monkeypatch.setenv("SUFEN_SERVICE_API_KEY", "service-key")
+    monkeypatch.setenv("SUFEN_PROVIDER_API_KEY", "provider-key")
     monkeypatch.setenv("SUFEN_FAKE_PROVIDER", "1")
     client = TestClient(create_app())
 
@@ -805,21 +953,70 @@ def test_http_chat_requires_service_api_key(monkeypatch):
     ).status_code == 403
     assert client.post(
         "/v1/chat",
-        headers={"X-SuFen-API-Key": "wrong"},
+        headers={"X-SuFen-API-Key": "provider-key"},
         json={"query": "AUTH-P-1"},
     ).status_code == 403
 
     ok = client.post(
         "/v1/chat",
-        headers={"X-SuFen-API-Key": "server-secret"},
+        headers={"X-SuFen-API-Key": "service-key"},
         json={"query": "AUTH-P-1"},
     )
     assert ok.status_code == 200
     assert ok.json()["missingAuthorizationRequests"][0]["reason"] == "missing_task_package"
 
 
+def test_http_service_key_and_provider_key_are_separate(monkeypatch):
+    clear_delegation_nonce_cache()
+    monkeypatch.setenv("SUFEN_SERVICE_API_KEY", "service-key")
+    monkeypatch.setenv("SUFEN_PROVIDER_API_KEY", "provider-key")
+    monkeypatch.setenv("SUFEN_DELEGATION_HMAC_SECRET", DELEGATION_SECRET)
+    monkeypatch.setenv("SUFEN_BASE_URL", "https://provider.test/v1")
+    monkeypatch.setenv("SUFEN_FAKE_PROVIDER", "0")
+    monkeypatch.setenv("SUFEN_TAVILY_API_KEY", "sufen-tavily")
+
+    import sufen.provider as provider
+
+    captured = {}
+
+    def fake_post(_url, headers, _payload):
+        captured["provider_auth"] = headers["Authorization"]
+        content = {
+            "answer": "split key ok",
+            "evidenceUsed": [],
+            "missingAuthorizationRequests": [],
+            "eventDrafts": [],
+            "fieldPatchDrafts": [],
+            "memoryPatch": None,
+            "toolAudit": [],
+        }
+        return {"choices": [{"message": {"content": json.dumps(content, ensure_ascii=False)}}]}
+
+    monkeypatch.setattr(provider, "_post_chat_completions", fake_post)
+    client = TestClient(create_app())
+    assert client.post(
+        "/v1/chat",
+        headers={"Authorization": "Bearer provider-key"},
+        json={"query": "AUTH-P-1"},
+    ).status_code == 403
+
+    delegation = _signed_delegation_token(nonce="nonce-split-key")
+    ok = client.post(
+        "/v1/chat",
+        headers={"Authorization": "Bearer service-key"},
+        json={
+            "query": "AUTH-P-1 KGREF-property-maintenance",
+            "taskPackage": _property_task(delegationToken=delegation.model_dump()),
+        },
+    )
+    assert ok.status_code == 200
+    assert ok.json()["answer"] == "split key ok"
+    assert captured["provider_auth"] == "Bearer provider-key"
+
+
 def test_http_chat_fails_closed_when_server_key_unconfigured(monkeypatch):
     monkeypatch.delenv("SUFEN_API_KEY", raising=False)
+    monkeypatch.delenv("SUFEN_SERVICE_API_KEY", raising=False)
     monkeypatch.setenv("SUFEN_FAKE_PROVIDER", "1")
     monkeypatch.setattr(sufen_config, "_candidate_env_files", lambda: [])
     client = TestClient(create_app())
@@ -829,7 +1026,7 @@ def test_http_chat_fails_closed_when_server_key_unconfigured(monkeypatch):
         json={"query": "AUTH-P-1"},
     )
     assert response.status_code == 503
-    assert response.json()["detail"]["error"] == "sufen_api_key_not_configured"
+    assert response.json()["detail"]["error"] == "sufen_service_api_key_not_configured"
 
 
 def test_sufen_version_smoke():

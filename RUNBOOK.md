@@ -19,7 +19,8 @@ Fill only SuFen-specific values in `.env`:
 ```bash
 SUFEN_PROVIDER=deepseek
 SUFEN_MODEL=deepseek-v4-pro
-SUFEN_API_KEY=
+SUFEN_SERVICE_API_KEY=
+SUFEN_PROVIDER_API_KEY=
 SUFEN_BASE_URL=
 SUFEN_DELEGATION_HMAC_SECRET=
 SUFEN_TAVILY_API_KEY=
@@ -28,6 +29,9 @@ SUFEN_BIND_HOST=127.0.0.1
 SUFEN_PORT=8791
 SUFEN_FAKE_PROVIDER=0
 ```
+
+`SUFEN_API_KEY` is a deprecated compatibility fallback for older local runs only.
+Use separate service and provider keys for deployment.
 
 ## Start
 
@@ -48,7 +52,7 @@ Task-package chat smoke:
 ```bash
 curl -s http://127.0.0.1:8791/v1/chat \
   -H 'content-type: application/json' \
-  -H "Authorization: Bearer $SUFEN_API_KEY" \
+  -H "Authorization: Bearer $SUFEN_SERVICE_API_KEY" \
   -d '{
     "query": "AUTH-P-1 KGREF-property-maintenance 这个房源怎么维护",
     "taskPackage": {

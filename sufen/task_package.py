@@ -172,6 +172,7 @@ def ensure_safe_actions(
     delegation_secret: str | None = None,
     now: datetime | None = None,
     consume_nonce: bool = True,
+    require_delegation_token: bool = False,
 ) -> None:
     forbidden = {"directWrite", "crossUserRead", "externalSend", "rawDbAccess"}
     if not forbidden.issubset(set(task.deniedActions)):
@@ -180,6 +181,8 @@ def ensure_safe_actions(
 
     token = task.delegationToken
     if token is None:
+        if require_delegation_token:
+            raise ValueError("delegation token is required in production mode")
         return
     if token.operatorUserId != task.operator.userId:
         raise ValueError("delegation token operatorUserId does not match task operator")

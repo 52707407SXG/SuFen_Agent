@@ -34,19 +34,19 @@ def _require_chat_auth(request: Request, configured_key: str) -> None:
     if not configured_key:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={"error": "sufen_api_key_not_configured"},
+            detail={"error": "sufen_service_api_key_not_configured"},
         )
     supplied = _request_api_key(request)
     if not supplied:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail={"error": "missing_sufen_api_key"},
+            detail={"error": "missing_sufen_service_api_key"},
             headers={"WWW-Authenticate": "Bearer"},
         )
     if not secrets.compare_digest(supplied, configured_key):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail={"error": "invalid_sufen_api_key"},
+            detail={"error": "invalid_sufen_service_api_key"},
         )
 
 
@@ -67,7 +67,7 @@ def create_app() -> FastAPI:
 
     @app.post("/v1/chat")
     async def chat(request: ChatRequest, raw_request: Request) -> dict[str, Any]:
-        _require_chat_auth(raw_request, settings.api_key)
+        _require_chat_auth(raw_request, settings.service_api_key)
         if request.taskPackage is None:
             response = SuFenResponse(
                 answer=FAIL_CLOSED_MESSAGE,

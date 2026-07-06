@@ -18,6 +18,9 @@ from sufen.task_package import SuFenTaskPackage, ensure_safe_actions
 from toolsets import SUFEN_TOOL_NAMES
 
 
+MAX_TOOL_LOOP_TURNS = 4
+
+
 class ProviderError(RuntimeError):
     """Raised when the production provider cannot return a SuFen response."""
 
@@ -104,13 +107,22 @@ def _user_message(prompt: str, task: SuFenTaskPackage) -> str:
     ])
 
 
-def build_provider_payload(prompt: str, task: SuFenTaskPackage, settings: SuFenSettings) -> dict[str, Any]:
+def build_provider_messages(prompt: str, task: SuFenTaskPackage) -> list[dict[str, Any]]:
+    return [
+        {"role": "system", "content": _system_message(task)},
+        {"role": "user", "content": _user_message(prompt, task)},
+    ]
+
+
+def build_provider_payload(
+    prompt: str,
+    task: SuFenTaskPackage,
+    settings: SuFenSettings,
+    messages: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     return {
         "model": settings.model,
-        "messages": [
-            {"role": "system", "content": _system_message(task)},
-            {"role": "user", "content": _user_message(prompt, task)},
-        ],
+        "messages": messages or build_provider_messages(prompt, task),
         "tools": _tool_definitions(),
         "tool_choice": "auto",
         "temperature": 0.2,
@@ -125,11 +137,18 @@ def _post_chat_completions(url: str, headers: dict[str, str], payload: dict[str,
         return response.json()
 
 
-def _provider_response_to_sufen(data: dict[str, Any]) -> SuFenResponse:
+def _message_from_provider(data: dict[str, Any]) -> dict[str, Any]:
     try:
-        content = data["choices"][0]["message"].get("content") or ""
+        message = data["choices"][0]["message"]
     except (KeyError, IndexError, TypeError) as exc:
-        raise ProviderError("provider response missing choices[0].message.content") from exc
+        raise ProviderError("provider response missing choices[0].message") from exc
+    if not isinstance(message, dict):
+        raise ProviderError("provider message must be an object")
+    return message
+
+
+def _provider_message_to_sufen(message: dict[str, Any]) -> SuFenResponse:
+    content = message.get("content") or ""
     try:
         response = SuFenResponse.model_validate(_extract_json_object(content))
     except (ValidationError, json.JSONDecodeError) as exc:
@@ -138,6 +157,70 @@ def _provider_response_to_sufen(data: dict[str, Any]) -> SuFenResponse:
         ToolAuditItem(tool="provider.chat_completions", action="real_provider_request", status="ok")
     )
     return response
+
+
+def _serialize_tool_result(result: Any) -> str:
+    if isinstance(result, str):
+        return result
+    return json.dumps(result, ensure_ascii=False, default=str)
+
+
+def _tool_call_id(tool_call: dict[str, Any], index: int) -> str:
+    return str(tool_call.get("id") or f"call_{index}")
+
+
+def _tool_call_name_and_args(tool_call: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    function = tool_call.get("function") or {}
+    name = str(function.get("name") or "").strip()
+    raw_args = function.get("arguments") or "{}"
+    if isinstance(raw_args, dict):
+        args = raw_args
+    else:
+        try:
+            args = json.loads(raw_args)
+        except json.JSONDecodeError as exc:
+            raise ProviderError(f"tool call {name or '<missing>'} arguments were not JSON") from exc
+    if not isinstance(args, dict):
+        raise ProviderError(f"tool call {name or '<missing>'} arguments must be an object")
+    return name, args
+
+
+def _dispatch_tool_call(tool_call: dict[str, Any], index: int) -> tuple[dict[str, Any], ToolAuditItem]:
+    name, args = _tool_call_name_and_args(tool_call)
+    if name not in SUFEN_TOOL_NAMES:
+        raise ProviderError(f"unauthorized tool call: {name or '<missing>'}")
+
+    from tools.registry import registry
+
+    result = registry.dispatch(name, args)
+    tool_message = {
+        "role": "tool",
+        "tool_call_id": _tool_call_id(tool_call, index),
+        "name": name,
+        "content": _serialize_tool_result(result),
+    }
+    audit = ToolAuditItem(tool=name, action="provider_tool_call", status="ok")
+    return tool_message, audit
+
+
+def _assistant_tool_call_message(message: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "role": "assistant",
+        "content": message.get("content"),
+        "tool_calls": message.get("tool_calls") or [],
+    }
+
+
+def _request_provider(settings: SuFenSettings, messages: list[dict[str, Any]], prompt: str, task: SuFenTaskPackage) -> dict[str, Any]:
+    payload = build_provider_payload(prompt, task, settings, messages=messages)
+    headers = {
+        "Authorization": f"Bearer {settings.provider_api_key}",
+        "Content-Type": "application/json",
+    }
+    try:
+        return _post_chat_completions(_chat_completions_url(settings), headers, payload)
+    except httpx.HTTPError as exc:
+        raise ProviderError(f"provider request failed: {exc}") from exc
 
 
 def missing_task_package_response() -> SuFenResponse:
@@ -162,7 +245,7 @@ def provider_fail_closed_response(reason: str, status: str) -> SuFenResponse:
         missingAuthorizationRequests=[
             AuthorizationRequest(
                 reason=reason,
-                acceptableRefs=["SUFEN_API_KEY", "SUFEN_BASE_URL", "OpenAI-compatible provider"],
+                acceptableRefs=["SUFEN_PROVIDER_API_KEY", "SUFEN_BASE_URL", "OpenAI-compatible provider"],
                 message=FAIL_CLOSED_MESSAGE,
             )
         ],
@@ -179,17 +262,42 @@ def answer_with_provider(
     settings = settings or load_settings()
     if task is None:
         return missing_task_package_response()
-    ensure_safe_actions(task, delegation_secret=settings.delegation_hmac_secret)
-    if not settings.api_key.strip():
-        return provider_fail_closed_response("missing_sufen_api_key", "missing_api_key")
+    ensure_safe_actions(
+        task,
+        delegation_secret=settings.delegation_hmac_secret,
+        require_delegation_token=True,
+    )
+    if not settings.provider_api_key.strip():
+        return provider_fail_closed_response("missing_sufen_provider_api_key", "missing_provider_api_key")
 
-    payload = build_provider_payload(prompt, task, settings)
-    headers = {
-        "Authorization": f"Bearer {settings.api_key}",
-        "Content-Type": "application/json",
-    }
-    try:
-        data = _post_chat_completions(_chat_completions_url(settings), headers, payload)
-    except httpx.HTTPError as exc:
-        raise ProviderError(f"provider request failed: {exc}") from exc
-    return _provider_response_to_sufen(data)
+    messages = build_provider_messages(prompt, task)
+    loop_audit: list[ToolAuditItem] = []
+    for turn in range(1, MAX_TOOL_LOOP_TURNS + 1):
+        data = _request_provider(settings, messages, prompt, task)
+        message = _message_from_provider(data)
+        tool_calls = message.get("tool_calls") or []
+        if not tool_calls:
+            response = _provider_message_to_sufen(message)
+            response.toolAudit.extend(loop_audit)
+            response.toolAudit.append(
+                ToolAuditItem(tool="provider.chat_completions", action="real_provider_request", status=f"ok_turns:{turn}")
+            )
+            return response
+
+        if not isinstance(tool_calls, list):
+            return provider_fail_closed_response("invalid_tool_calls", "tool_calls_not_list")
+
+        messages.append(_assistant_tool_call_message(message))
+        try:
+            for index, tool_call in enumerate(tool_calls):
+                tool_message, audit = _dispatch_tool_call(tool_call, index)
+                messages.append(tool_message)
+                loop_audit.append(audit)
+        except ProviderError as exc:
+            response = provider_fail_closed_response("unauthorized_tool_call", f"rejected: {exc}")
+            response.toolAudit.extend(loop_audit)
+            return response
+
+    response = provider_fail_closed_response("tool_loop_exceeded", f"max_turns:{MAX_TOOL_LOOP_TURNS}")
+    response.toolAudit.extend(loop_audit)
+    return response

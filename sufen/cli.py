@@ -63,7 +63,9 @@ def _cmd_doctor(_: argparse.Namespace) -> int:
     print(f"memory_root: {settings.memory_root}")
     print(f"provider: {settings.provider}")
     print(f"model: {settings.model}")
-    print(f"api_key: {'set' if settings.api_key else 'missing'}")
+    print(f"service_api_key: {'set' if settings.service_api_key else 'missing'}")
+    print(f"provider_api_key: {'set' if settings.provider_api_key else 'missing'}")
+    print(f"deprecated_sufen_api_key: {'set' if settings.api_key else 'missing'}")
     return 0
 
 

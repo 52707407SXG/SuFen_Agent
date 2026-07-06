@@ -20,6 +20,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 class SuFenSettings:
     provider: str
     model: str
+    service_api_key: str
+    provider_api_key: str
     api_key: str
     base_url: str
     fake_provider: bool
@@ -94,10 +96,13 @@ def load_settings() -> SuFenSettings:
         raise ValueError("SUFEN_PORT must be an integer") from exc
 
     home = get_sufen_home()
+    deprecated_api_key = _env("SUFEN_API_KEY")
     return SuFenSettings(
         provider=_env("SUFEN_PROVIDER", "deepseek"),
         model=_env("SUFEN_MODEL", "deepseek-v4-pro"),
-        api_key=_env("SUFEN_API_KEY"),
+        service_api_key=_env("SUFEN_SERVICE_API_KEY", deprecated_api_key),
+        provider_api_key=_env("SUFEN_PROVIDER_API_KEY", deprecated_api_key),
+        api_key=deprecated_api_key,
         base_url=_env("SUFEN_BASE_URL"),
         fake_provider=_env_bool("SUFEN_FAKE_PROVIDER", False),
         delegation_hmac_secret=_env("SUFEN_DELEGATION_HMAC_SECRET"),
