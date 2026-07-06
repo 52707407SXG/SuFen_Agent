@@ -50,28 +50,63 @@ curl http://127.0.0.1:8791/health
 Task-package chat smoke:
 
 ```bash
-curl -s http://127.0.0.1:8791/v1/chat \
-  -H 'content-type: application/json' \
-  -H "Authorization: Bearer $SUFEN_SERVICE_API_KEY" \
-  -d '{
-    "query": "AUTH-P-1 KGREF-property-maintenance 这个房源怎么维护",
-    "taskPackage": {
-      "operator": {"userId": "1001", "name": "经纪人A", "role": "broker"},
-      "subject": {"type": "property", "id": "P-1"},
-      "scene": "房源维护",
-      "archiveContext": {
+set -a
+source .env
+set +a
+
+python - <<'PY' > /tmp/sufen-smoke-request.json
+import json
+import os
+from datetime import datetime, timedelta, timezone
+
+from sufen.task_package import AgentDelegationToken, sign_delegation_token
+
+task = {
+    "operator": {"userId": "1001", "name": "经纪人A", "role": "broker"},
+    "subject": {"type": "property", "id": "P-1"},
+    "scene": "房源维护",
+    "archiveContext": {
         "companyId": "company-ZYJ",
+        "authorizationId": "AUTH-P-1",
         "baseInfo": {"title": "阳光花园三居", "askingPrice": "480万"},
         "propertyNote": "业主说先按原价挂一周。",
         "ownerIntent": "想换房，但对降价犹豫",
         "fiveDimensionScores": {"priceFlexibility": 2, "urgency": 3},
-        "eventSummary": ["近三天有两组看房但无明确报价"]
-      },
-      "brokerProfile": {"capabilityStage": "新手"},
-      "knowledgeGraphRefs": ["KGREF-property-maintenance"],
-      "scopedMemoryKey": "company-ZYJ/operators/1001/subjects/property/P-1"
-    }
-  }'
+        "eventSummary": ["近三天有两组看房但无明确报价"],
+        "knowledgeGraphs": {
+            "KGREF-property-maintenance": {
+                "name": "房源维护知识图谱",
+                "focus": "业主维护、价格弹性、带看反馈",
+            }
+        },
+    },
+    "brokerProfile": {"capabilityStage": "新手"},
+    "knowledgeGraphRefs": ["KGREF-property-maintenance"],
+    "scopedMemoryKey": "company-ZYJ/operators/1001/subjects/property/P-1",
+}
+delegation = AgentDelegationToken.model_validate({
+    "actorAgent": "lucan",
+    "operatorUserId": "1001",
+    "subject": task["subject"],
+    "allowedActions": ["analyze", "suggest", "eventDraft", "fieldPatchDraft", "memoryPatch"],
+    "expiresAt": (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat(),
+    "nonce": "sufen-smoke-local",
+    "signature": "pending",
+})
+task["delegationToken"] = delegation.model_copy(update={
+    "signature": sign_delegation_token(delegation, os.environ["SUFEN_DELEGATION_HMAC_SECRET"])
+}).model_dump(mode="json")
+
+print(json.dumps({
+    "query": "AUTH-P-1 KGREF-property-maintenance 这个房源怎么维护",
+    "taskPackage": task,
+}, ensure_ascii=False))
+PY
+
+curl -s http://127.0.0.1:8791/v1/chat \
+  -H 'content-type: application/json' \
+  -H "Authorization: Bearer $SUFEN_SERVICE_API_KEY" \
+  --data-binary @/tmp/sufen-smoke-request.json
 ```
 
 Local fake-provider dry-run:

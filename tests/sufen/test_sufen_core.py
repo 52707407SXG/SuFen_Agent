@@ -1378,6 +1378,16 @@ def test_sufen_chat_unsafe_task_package_fails_closed(tmp_path):
     assert payload["missingAuthorizationRequests"][0]["reason"] == "unsafe_task_package"
 
 
+def test_runbook_v1_chat_smoke_includes_delegation_token():
+    runbook = (REPO_ROOT / "RUNBOOK.md").read_text(encoding="utf-8")
+    assert "/v1/chat" in runbook
+    assert "delegationToken" in runbook
+    assert "AgentDelegationToken" in runbook
+    assert "sign_delegation_token" in runbook
+    assert "SUFEN_DELEGATION_HMAC_SECRET" in runbook
+    assert "--data-binary @/tmp/sufen-smoke-request.json" in runbook
+
+
 def test_first_release_metadata_exposes_only_sufen_surfaces():
     pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     extras = pyproject["project"]["optional-dependencies"]
