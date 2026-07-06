@@ -18,9 +18,12 @@ cp .env.example .env
 
 ```bash
 sufen --version
+sufen
 sufen chat -q "AUTH-P-1001 这个业主现在该怎么跟" --task-package /path/to/task-package.json
 sufen serve
 ```
+
+直接输入 `sufen` 会进入本机对话入口；生产服务仍使用 `sufen serve`。
 
 健康检查：
 

@@ -17,6 +17,10 @@ from sufen.provider import ProviderError
 from sufen.task_package import SuFenTaskPackage
 
 
+def _stdin_is_tty() -> bool:
+    return bool(getattr(sys.stdin, "isatty", lambda: False)())
+
+
 def _load_task_package(path: str | None) -> SuFenTaskPackage | None:
     if not path:
         return None
@@ -24,10 +28,9 @@ def _load_task_package(path: str | None) -> SuFenTaskPackage | None:
         return SuFenTaskPackage.model_validate(json.load(handle))
 
 
-def _cmd_chat(args: argparse.Namespace) -> int:
-    task = _load_task_package(args.task_package)
+def _answer_as_json(query: str, *, task: SuFenTaskPackage | None, force_fake: bool) -> str:
     try:
-        result = answer_sufen(args.query or "", task=task, force_fake=bool(args.fake))
+        result = answer_sufen(query, task=task, force_fake=force_fake)
     except (ProviderError, ValueError) as exc:
         result = SuFenResponse(
             answer=FAIL_CLOSED_MESSAGE,
@@ -42,7 +45,27 @@ def _cmd_chat(args: argparse.Namespace) -> int:
                 ToolAuditItem(tool="task_package", action="validate_scope", status=f"rejected: {exc}")
             ],
         )
-    print(result.model_dump_json(indent=2, ensure_ascii=False))
+    return result.model_dump_json(indent=2, ensure_ascii=False)
+
+
+def _cmd_chat(args: argparse.Namespace) -> int:
+    task = _load_task_package(args.task_package)
+    query = (args.query or "").strip()
+    if not query and _stdin_is_tty():
+        print(f"SuFen-Agent v{__version__}")
+        print("Local SuFen chat. Type a question and press Enter. Ctrl-D or Ctrl-C exits.")
+        print("Without a My Stand taskPackage, SuFen will fail closed instead of guessing archive facts.")
+        while True:
+            try:
+                query = input("sufen> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return 0
+            if not query:
+                continue
+            print(_answer_as_json(query, task=task, force_fake=bool(args.fake)))
+        return 0
+    print(_answer_as_json(query, task=task, force_fake=bool(args.fake)))
     return 0
 
 
@@ -96,7 +119,10 @@ def main(argv: list[str] | None = None) -> int:
     os.environ.setdefault("SUFEN_COMMAND_NAME", "sufen")
     bridge_inherited_runtime_home()
 
+    argv = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
+    if not argv and _stdin_is_tty():
+        argv = ["chat"]
     args = parser.parse_args(argv)
     if args.version or args.command == "version":
         print(f"SuFen-Agent v{__version__}")

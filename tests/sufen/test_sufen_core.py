@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import tomllib
+from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -1645,6 +1646,35 @@ def test_sufen_version_smoke():
         check=True,
     )
     assert "SuFen-Agent v" in result.stdout
+
+
+def test_sufen_without_args_enters_local_chat(monkeypatch, capsys):
+    import builtins
+    import sufen.cli as sufen_cli
+
+    monkeypatch.setenv("SUFEN_FAKE_PROVIDER", "1")
+    monkeypatch.setattr(sufen_config, "_candidate_env_files", lambda: [])
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    lines = iter(["AUTH-P-1", ""])
+
+    def fake_input(_: str) -> str:
+        try:
+            value = next(lines)
+        except StopIteration:
+            raise EOFError from None
+        if value == "":
+            raise EOFError
+        return value
+
+    monkeypatch.setattr(builtins, "input", fake_input)
+
+    assert sufen_cli.main([]) == 0
+    output = capsys.readouterr().out
+    assert "SuFen-Agent v" in output
+    assert "Local SuFen chat" in output
+    payload = json.loads(output[output.index("{"):output.rindex("}") + 1])
+    assert "SuFen" in payload["answer"]
+    assert payload["evidenceUsed"][0]["source"] == "AUTH-P-1"
 
 
 def test_sufen_chat_unsafe_task_package_fails_closed(tmp_path):

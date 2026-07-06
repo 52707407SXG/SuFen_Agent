@@ -37,9 +37,13 @@ Use separate service and provider keys for deployment.
 
 ```bash
 sufen --version
+sufen
 sufen chat -q "AUTH-P-1001 这个业主现在该怎么跟" --task-package /path/to/task-package.json
 sufen serve
 ```
+
+`sufen` without arguments opens the local terminal chat entry. The systemd
+service must continue to use `sufen serve`.
 
 Health:
 
