@@ -545,6 +545,8 @@ def test_sufen_policy_enters_actual_system_prompt(monkeypatch):
     parts = build_system_prompt_parts(_AgentStub())
     assert "你是 SuFen" in parts["stable"]
     assert "资料优先" in parts["stable"]
+    assert "分层加载顺序" in parts["stable"]
+    assert "contextLoadPlan" in parts["stable"]
     assert "验收要求" in parts["stable"]
     assert "companyId + operatorUserId + subjectType + subjectId" in parts["stable"]
     assert "不重要内容一律视为垃圾" in parts["stable"]
@@ -562,6 +564,7 @@ def test_sufen_policy_builds_without_inherited_runtime(monkeypatch):
     assert "资料优先" in parts["stable"]
     assert "实际 LLM 请求的 system message" in parts["stable"]
     assert "Markdown" in parts["stable"]
+    assert "标记为 `loaded`" in parts["stable"]
 
 
 def test_provider_system_message_allows_markdown_inside_answer():
@@ -575,6 +578,8 @@ def test_provider_system_message_allows_markdown_inside_answer():
     assert "代码围栏" in system_message
     assert "taskPackage.archiveContext.archive" in system_message
     assert "不得因为用户没有额外粘贴" in system_message
+    assert "contextLoadPlan" in system_message
+    assert "未标记 loaded 的资料不得假装已读" in system_message
 
 
 def test_sufen_policy_reaches_chat_completion_request_system_message(monkeypatch):

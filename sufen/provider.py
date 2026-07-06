@@ -354,6 +354,7 @@ def _system_message(task: SuFenTaskPackage) -> str:
         "scoped memory 只能使用 My Stand taskPackage 锁定的范围，模型不得自选 memoryRoot，不得切换 admin 路径："
         + json.dumps(scope, ensure_ascii=False, sort_keys=True),
         "My Stand taskPackage.archiveContext.archive、archiveContext.broker、archiveContext.archiveRows、archiveSummary、parserToolResults、referenceContext 和 systemFoundationContext 是后端已按权限注入的当前可读资料；只要这些字段里已有当前档案资料，必须直接读取并据此回答，不得因为用户没有额外粘贴 AUTH/OUT/KGREF 就说当前档案缺资料。",
+        "必须遵守 taskPackage.archiveContext.contextLoadPlan：先用 loaded 层轻量回应或追问，目标明确后再按触发条件展开特征卡、房源笔记、图片/OCR、知识图谱等未加载层；未标记 loaded 的资料不得假装已读。",
         _authorized_context_card(task),
         "所有事件、字段修改、记忆修改都只能作为 draft 返回，不能直接写正式数据。",
     ])
