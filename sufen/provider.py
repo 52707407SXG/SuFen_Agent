@@ -12,13 +12,14 @@ from pydantic import ValidationError
 
 from sufen.auth import FAIL_CLOSED_MESSAGE, extract_authorization_refs
 from sufen.config import SuFenSettings, load_settings
-from sufen.output import AuthorizationRequest, SuFenResponse, ToolAuditItem
+from sufen.output import AuthorizationRequest, EvidenceItem, MemoryPatch, SuFenResponse, ToolAuditItem
 from sufen.prompt.identity import build_sufen_identity_block
 from sufen.task_package import SuFenTaskPackage, ensure_safe_actions
 from toolsets import SUFEN_TOOL_NAMES
 
 
 MAX_TOOL_LOOP_TURNS = 4
+AUTHORIZED_CONTEXT_RETRY_MARKER = "后端已授权当前资料事实卡"
 
 
 class ProviderError(RuntimeError):
@@ -244,6 +245,72 @@ def _tool_definitions() -> list[dict[str, Any]]:
     return safe_definitions
 
 
+def _short_text(value: Any, limit: int = 6000) -> Any:
+    if isinstance(value, str):
+        text = value.strip()
+        return text if len(text) <= limit else text[:limit] + "..."
+    return value
+
+
+def _compact_authorized_value(value: Any, *, depth: int = 0) -> Any:
+    if depth > 5:
+        return _short_text(json.dumps(value, ensure_ascii=False, sort_keys=True), 1200)
+    if isinstance(value, dict):
+        return {
+            str(key): _compact_authorized_value(item, depth=depth + 1)
+            for key, item in value.items()
+            if item not in (None, "", [], {})
+        }
+    if isinstance(value, list):
+        return [_compact_authorized_value(item, depth=depth + 1) for item in value[:30]]
+    return _short_text(value, 3000)
+
+
+def _authorized_context_payload(task: SuFenTaskPackage) -> dict[str, Any]:
+    archive_context = task.archiveContext or {}
+    payload: dict[str, Any] = {}
+    for key in (
+        "actualArchiveId",
+        "authorizationId",
+        "archive",
+        "broker",
+        "archiveSummary",
+        "archiveRows",
+        "parserToolResults",
+        "parserToolSummary",
+        "referenceContext",
+    ):
+        value = archive_context.get(key)
+        if value not in (None, "", [], {}):
+            payload[key] = _compact_authorized_value(value)
+    return payload
+
+
+def _has_backend_authorized_context(task: SuFenTaskPackage) -> bool:
+    payload = _authorized_context_payload(task)
+    return bool(
+        payload.get("archive")
+        or payload.get("broker")
+        or payload.get("archiveSummary")
+        or payload.get("archiveRows")
+    )
+
+
+def _authorized_context_card(task: SuFenTaskPackage) -> str:
+    payload = _authorized_context_payload(task)
+    if not payload:
+        return (
+            f"{AUTHORIZED_CONTEXT_RETRY_MARKER}：本轮 taskPackage 没有注入当前档案正文；"
+            "若用户问题需要档案事实，必须按缺资料处理。"
+        )
+    return (
+        f"{AUTHORIZED_CONTEXT_RETRY_MARKER}：以下内容由 My Stand 后端按当前登录账号权限注入，"
+        "就是本轮当前档案/经纪人档案的可读资料。用户问“当前档案”“这个客户/业主/售后/经纪人”时，"
+        "必须优先直接读取这里的事实并回答，不得要求用户再提供站内ID。\n"
+        + json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2)[:30_000]
+    )
+
+
 def _system_message(task: SuFenTaskPackage) -> str:
     scope = {
         "companyId": task.archiveContext.get("companyId", "company-ZYJ"),
@@ -264,7 +331,7 @@ def _system_message(task: SuFenTaskPackage) -> str:
     }
     return "\n\n".join([
         build_sufen_identity_block(),
-        "你必须只返回 JSON，不要 Markdown，不要代码围栏。",
+        "你必须只返回 JSON，不要代码围栏；当回答较长、需要讲解、复盘、拆步骤、列依据、给话术或做表格对比时，answer 字段可以并应优先使用 Markdown。闲聊或短答可以是普通文本。",
         "输出 JSON 必须符合 SuFenResponse 合同，并至少包含这些顶层字段："
         + json.dumps(output_contract, ensure_ascii=False, separators=(",", ":")),
         "本轮只允许使用 SuFen 第一版工具白名单："
@@ -273,6 +340,8 @@ def _system_message(task: SuFenTaskPackage) -> str:
         + json.dumps(PROVIDER_TOOL_NAME_BY_INTERNAL, ensure_ascii=False, sort_keys=True),
         "scoped memory 只能使用 My Stand taskPackage 锁定的范围，模型不得自选 memoryRoot，不得切换 admin 路径："
         + json.dumps(scope, ensure_ascii=False, sort_keys=True),
+        "My Stand taskPackage.archiveContext.archive、archiveContext.broker、archiveContext.archiveRows、archiveSummary、parserToolResults、referenceContext 和 systemFoundationContext 是后端已按权限注入的当前可读资料；只要这些字段里已有当前档案资料，必须直接读取并据此回答，不得因为用户没有额外粘贴 AUTH/OUT/KGREF 就说当前档案缺资料。",
+        _authorized_context_card(task),
         "所有事件、字段修改、记忆修改都只能作为 draft 返回，不能直接写正式数据。",
     ])
 
@@ -336,6 +405,154 @@ def _provider_message_to_sufen(message: dict[str, Any]) -> SuFenResponse:
         ToolAuditItem(tool="provider.chat_completions", action="real_provider_request", status="ok")
     )
     return response
+
+
+def _looks_like_wrong_missing_context_response(response: SuFenResponse, task: SuFenTaskPackage) -> bool:
+    if not _has_backend_authorized_context(task):
+        return False
+    answer = response.answer or ""
+    if FAIL_CLOSED_MESSAGE in answer:
+        return True
+    missing_reasons = " ".join(item.reason for item in response.missingAuthorizationRequests)
+    if missing_reasons and re.search(r"missing|authorization|required|archive|reference", missing_reasons, flags=re.I):
+        return True
+    return bool(re.search(r"缺关键资料|站内ID|提供.*ID|没有.*资料", answer))
+
+
+def _authorized_context_retry_prompt(prompt: str, response: SuFenResponse, task: SuFenTaskPackage) -> str:
+    return "\n\n".join([
+        "上一轮输出错误地要求用户补站内ID，但本轮 taskPackage 已经包含后端授权的当前资料。",
+        "请重新回答：必须直接读取“后端已授权当前资料事实卡”和 taskPackage.archiveContext 中的事实，复述用户要求的关键资料，再给建议。",
+        "禁止继续要求用户提供当前档案站内ID；只有事实卡和 taskPackage 都没有目标资料时才允许说缺资料。",
+        "上一轮错误回答：",
+        response.answer,
+        "原始经纪人问题：",
+        prompt or "",
+        _authorized_context_card(task),
+    ])
+
+
+def _text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        return "；".join(_text(item) for item in value if _text(item))
+    if isinstance(value, dict):
+        return "；".join(f"{key}: {_text(item)}" for key, item in value.items() if _text(item))
+    return str(value).strip()
+
+
+def _archive_title(archive: dict[str, Any], task: SuFenTaskPackage) -> str:
+    return (
+        _text(archive.get("displayName"))
+        or _text(archive.get("name"))
+        or _text(archive.get("ownerName"))
+        or task.subject.id
+    )
+
+
+def _fallback_field_rows(archive: dict[str, Any]) -> list[tuple[str, str]]:
+    rows: list[tuple[str, str]] = []
+    for key in ("id", "type", "displayName", "ownerName", "grade", "score", "status", "summary"):
+        value = _text(archive.get(key))
+        if value:
+            rows.append((key, value))
+    fields = archive.get("fields")
+    if isinstance(fields, dict):
+        for key, value in fields.items():
+            text = _text(value)
+            if text:
+                rows.append((str(key), text))
+    return rows[:24]
+
+
+def _authorized_context_fallback_response(
+    *,
+    prompt: str,
+    previous_response: SuFenResponse,
+    task: SuFenTaskPackage,
+    loop_audit: list[ToolAuditItem],
+) -> SuFenResponse:
+    archive_context = task.archiveContext or {}
+    archive = archive_context.get("archive") if isinstance(archive_context.get("archive"), dict) else {}
+    broker = archive_context.get("broker") if isinstance(archive_context.get("broker"), dict) else {}
+    subject_payload = archive or broker
+    title = _archive_title(subject_payload, task) if subject_payload else task.subject.id
+    rows = _fallback_field_rows(subject_payload) if subject_payload else []
+    rows_markdown = "\n".join(f"| {key} | {value} |" for key, value in rows) or "| 当前资料 | taskPackage 已授权，但可展示字段为空 |"
+    facts_text = "；".join(f"{key}: {value}" for key, value in rows[:12])
+    scene = task.scene or "当前档案"
+    answer = (
+        f"**当前{scene}档案：{title}**\n\n"
+        "| 字段 | 内容 |\n|---|---|\n"
+        f"{rows_markdown}\n\n"
+        "**判断**\n"
+        f"- 以上内容来自 My Stand 后端本轮已授权注入的 taskPackage，不需要再补当前档案站内ID。\n"
+        "- 本轮只围绕当前 operator + subject 的任务范围回答，不引用其他经纪人或其他档案。\n\n"
+        "**下一步**\n"
+        "1. 先按表格里的关键事实确认沟通目标。\n"
+        "2. 把本轮真正重要的业务判断沉淀为摘要，寒暄和过程性原文不长期保存。\n"
+        "3. 如果要生成事件、字段修改或外发话术，继续走草稿确认，不直接写正式数据。"
+    )
+    if prompt:
+        answer += f"\n\n**本轮问题**\n\n{prompt.strip()[:1200]}"
+
+    scope = {
+        "companyId": str(archive_context.get("companyId") or "company-ZYJ"),
+        "operatorUserId": task.operator.userId,
+        "subjectType": task.subject.type,
+        "subjectId": task.subject.id,
+        "scene": scene,
+    }
+    source_refs = [
+        str(item)
+        for item in (
+            archive_context.get("authorizationId"),
+            archive_context.get("actualArchiveId"),
+            task.scopedMemoryKey,
+        )
+        if item
+    ]
+    return SuFenResponse(
+        answer=answer,
+        evidenceUsed=[
+            EvidenceItem(
+                source="taskPackage.archiveContext",
+                summary=f"模型误判缺资料后，SuFen 按后端授权 taskPackage 读取当前资料：{facts_text[:1000] or title}",
+                confidence=0.72,
+            )
+        ],
+        missingAuthorizationRequests=[],
+        memoryPatch=MemoryPatch(
+            scope=scope,
+            businessFacts=[fact for fact in [facts_text[:1200], f"当前档案标题：{title}"] if fact],
+            strategyObservations=[
+                f"本轮按已授权 taskPackage 读取{scene}资料；模型缺资料话术已被后端兜底拦截。",
+            ],
+            brokerAdaptation=[],
+            openQuestions=[],
+            lastSummary=f"{scene} {title}：{facts_text[:800]}",
+            memoryIndexText=f"{scene} {title} {facts_text[:1200]}",
+            sourceRefs=source_refs,
+            confidence=0.72,
+        ),
+        toolAudit=[
+            *loop_audit,
+            *previous_response.toolAudit,
+            ToolAuditItem(
+                tool="provider.chat_completions",
+                action="real_provider_request",
+                status="ok_context_fallback",
+            ),
+            ToolAuditItem(
+                tool="provider.chat_completions",
+                action="authorized_context_fallback",
+                status="model_still_requested_missing_data_after_retry",
+            ),
+        ],
+    )
 
 
 def _serialize_tool_result(result: Any) -> str:
@@ -516,12 +733,32 @@ def answer_with_provider(
 
     messages = build_provider_messages(prompt, task)
     loop_audit: list[ToolAuditItem] = []
+    retried_authorized_context = False
     for turn in range(1, MAX_TOOL_LOOP_TURNS + 1):
         data = _request_provider(settings, messages, prompt, task)
         message = _message_from_provider(data)
         tool_calls = message.get("tool_calls") or []
         if not tool_calls:
             response = _provider_message_to_sufen(message)
+            if _looks_like_wrong_missing_context_response(response, task):
+                if not retried_authorized_context:
+                    retried_authorized_context = True
+                    loop_audit.append(
+                        ToolAuditItem(
+                            tool="provider.chat_completions",
+                            action="authorized_context_retry",
+                            status="model_requested_missing_data_despite_task_package",
+                        )
+                    )
+                    prompt = _authorized_context_retry_prompt(prompt, response, task)
+                    messages = build_provider_messages(prompt, task)
+                    continue
+                return _authorized_context_fallback_response(
+                    prompt=prompt,
+                    previous_response=response,
+                    task=task,
+                    loop_audit=loop_audit,
+                )
             response.toolAudit.extend(loop_audit)
             response.toolAudit.append(
                 ToolAuditItem(tool="provider.chat_completions", action="real_provider_request", status=f"ok_turns:{turn}")
@@ -540,8 +777,22 @@ def answer_with_provider(
         except ProviderError as exc:
             response = provider_fail_closed_response("unauthorized_tool_call", f"rejected: {exc}")
             response.toolAudit.extend(loop_audit)
+            if _has_backend_authorized_context(task):
+                return _authorized_context_fallback_response(
+                    prompt=prompt,
+                    previous_response=response,
+                    task=task,
+                    loop_audit=loop_audit,
+                )
             return response
 
     response = provider_fail_closed_response("tool_loop_exceeded", f"max_turns:{MAX_TOOL_LOOP_TURNS}")
     response.toolAudit.extend(loop_audit)
+    if _has_backend_authorized_context(task):
+        return _authorized_context_fallback_response(
+            prompt=prompt,
+            previous_response=response,
+            task=task,
+            loop_audit=loop_audit,
+        )
     return response

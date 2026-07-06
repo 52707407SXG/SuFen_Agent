@@ -548,6 +548,10 @@ def test_sufen_policy_enters_actual_system_prompt(monkeypatch):
     assert "companyId + operatorUserId + subjectType + subjectId" in parts["stable"]
     assert "不重要内容一律视为垃圾" in parts["stable"]
     assert "原始聊天、长文、图片 OCR、语音转写、附件全文" in parts["stable"]
+    assert "answer" in parts["stable"]
+    assert "Markdown" in parts["stable"]
+    assert "taskPackage.archiveContext.archive" in parts["stable"]
+    assert "不得因为用户没有额外粘贴" in parts["stable"]
 
 
 def test_sufen_policy_builds_without_inherited_runtime(monkeypatch):
@@ -556,6 +560,20 @@ def test_sufen_policy_builds_without_inherited_runtime(monkeypatch):
     assert "你是 SuFen" in parts["stable"]
     assert "资料优先" in parts["stable"]
     assert "实际 LLM 请求的 system message" in parts["stable"]
+    assert "Markdown" in parts["stable"]
+
+
+def test_provider_system_message_allows_markdown_inside_answer():
+    import sufen.provider as provider
+
+    task = SuFenTaskPackage.model_validate(_property_task())
+    system_message = provider.build_provider_messages("讲一下维护策略", task)[0]["content"]
+    assert "只返回 JSON" in system_message
+    assert "answer 字段" in system_message
+    assert "Markdown" in system_message
+    assert "代码围栏" in system_message
+    assert "taskPackage.archiveContext.archive" in system_message
+    assert "不得因为用户没有额外粘贴" in system_message
 
 
 def test_sufen_policy_reaches_chat_completion_request_system_message(monkeypatch):
@@ -670,6 +688,198 @@ def test_production_chat_uses_real_provider_not_fake(monkeypatch):
     assert all("." not in name for name in exposed)
     assert "mystand_archive_read" in captured["payload"]["messages"][0]["content"]
     assert any(item.tool == "provider.chat_completions" for item in response.toolAudit)
+
+
+def test_provider_system_message_includes_backend_authorized_archive_card():
+    import sufen.provider as provider
+
+    task = SuFenTaskPackage.model_validate(_property_task(archiveContext={
+        "companyId": "company-ZYJ",
+        "authorizationId": "AUTH-P-1",
+        "archive": {
+            "id": "P-1",
+            "displayName": "验收赵姐金融城房源",
+            "fields": {"业主姓名": "赵姐", "底价": "620万"},
+        },
+    }))
+
+    messages = provider.build_provider_messages("请读当前档案", task)
+    system_message = messages[0]["content"]
+
+    assert "后端已授权当前资料事实卡" in system_message
+    assert "赵姐" in system_message
+    assert "620万" in system_message
+    assert "不得要求用户再提供站内ID" in system_message
+
+
+def test_provider_retries_when_model_wrongly_requests_id_despite_task_package(monkeypatch):
+    clear_delegation_nonce_cache()
+    monkeypatch.setenv("SUFEN_PROVIDER_API_KEY", "provider-key")
+    monkeypatch.setenv("SUFEN_DELEGATION_HMAC_SECRET", DELEGATION_SECRET)
+    monkeypatch.setenv("SUFEN_BASE_URL", "https://provider.test/v1")
+    monkeypatch.setenv("SUFEN_TAVILY_API_KEY", "sufen-tavily")
+
+    import sufen.provider as provider
+
+    calls = []
+
+    def fake_post(_url, _headers, payload):
+        calls.append(payload)
+        if len(calls) == 1:
+            content = {
+                "answer": FAIL_CLOSED_MESSAGE,
+                "evidenceUsed": [],
+                "missingAuthorizationRequests": [{"reason": "missing_authorized_reference", "message": FAIL_CLOSED_MESSAGE}],
+                "eventDrafts": [],
+                "fieldPatchDrafts": [],
+                "memoryPatch": None,
+                "toolAudit": [],
+            }
+            return {"choices": [{"message": {"content": json.dumps(content, ensure_ascii=False)}}]}
+
+        joined_messages = "\n".join(message["content"] or "" for message in payload["messages"])
+        assert "后端已授权当前资料事实卡" in joined_messages
+        assert "上一轮输出错误地要求用户补站内ID" in joined_messages
+        assert "赵姐" in joined_messages
+        assert "620万" in joined_messages
+        content = {
+            "answer": "当前房源业主是赵姐，底价620万。",
+            "evidenceUsed": [{"source": "taskPackage.archiveContext.archive", "summary": "读取当前档案事实"}],
+            "missingAuthorizationRequests": [],
+            "eventDrafts": [],
+            "fieldPatchDrafts": [],
+            "memoryPatch": None,
+            "toolAudit": [],
+        }
+        return {"choices": [{"message": {"content": json.dumps(content, ensure_ascii=False)}}]}
+
+    monkeypatch.setattr(provider, "_post_chat_completions", fake_post)
+    delegation = _signed_delegation_token(nonce="nonce-authorized-context-retry")
+    task = SuFenTaskPackage.model_validate(_property_task(
+        archiveContext={
+            "companyId": "company-ZYJ",
+            "authorizationId": "AUTH-P-1",
+            "archive": {
+                "id": "P-1",
+                "displayName": "验收赵姐金融城房源",
+                "fields": {"业主姓名": "赵姐", "底价": "620万"},
+            },
+        },
+        delegationToken=delegation.model_dump(),
+    ))
+
+    response = answer_sufen("请根据当前档案复述业主姓名和底价", task=task, settings=load_settings())
+
+    assert len(calls) == 2
+    assert "赵姐" in response.answer
+    assert "620万" in response.answer
+    assert not response.missingAuthorizationRequests
+    assert any(item.action == "authorized_context_retry" for item in response.toolAudit)
+
+
+def test_provider_falls_back_to_task_package_when_retry_still_requests_id(monkeypatch):
+    clear_delegation_nonce_cache()
+    monkeypatch.setenv("SUFEN_PROVIDER_API_KEY", "provider-key")
+    monkeypatch.setenv("SUFEN_DELEGATION_HMAC_SECRET", DELEGATION_SECRET)
+    monkeypatch.setenv("SUFEN_BASE_URL", "https://provider.test/v1")
+    monkeypatch.setenv("SUFEN_TAVILY_API_KEY", "sufen-tavily")
+
+    import sufen.provider as provider
+
+    calls = []
+
+    def fake_post(_url, _headers, payload):
+        calls.append(payload)
+        content = {
+            "answer": FAIL_CLOSED_MESSAGE,
+            "evidenceUsed": [],
+            "missingAuthorizationRequests": [{"reason": "missing_authorized_reference", "message": FAIL_CLOSED_MESSAGE}],
+            "eventDrafts": [],
+            "fieldPatchDrafts": [],
+            "memoryPatch": None,
+            "toolAudit": [],
+        }
+        return {"choices": [{"message": {"content": json.dumps(content, ensure_ascii=False)}}]}
+
+    monkeypatch.setattr(provider, "_post_chat_completions", fake_post)
+    delegation = _signed_delegation_token(
+        subject={"type": "after-sale", "id": "SH-1"},
+        nonce="nonce-authorized-context-fallback",
+    )
+    task = SuFenTaskPackage.model_validate({
+        "operator": {"userId": "1001", "name": "经纪人A", "role": "broker"},
+        "subject": {"type": "after-sale", "id": "SH-1"},
+        "scene": "售后维护",
+        "archiveContext": {
+            "companyId": "company-ZYJ",
+            "authorizationId": "AUTH-SH-1",
+            "archive": {
+                "id": "SH-1",
+                "displayName": "陈总售后",
+                "fields": {"客户姓名": "陈总", "成交房源": "银泰泰悦湾", "售后重点": "节日问候和转介绍"},
+            },
+        },
+        "scopedMemoryKey": "company-ZYJ/operators/1001/subjects/after-sale/SH-1",
+        "delegationToken": delegation.model_dump(),
+    })
+
+    response = answer_sufen("请读当前售后档案", task=task, settings=load_settings())
+
+    assert len(calls) == 2
+    assert "陈总" in response.answer
+    assert "银泰泰悦湾" in response.answer
+    assert "转介绍" in response.answer
+    assert not response.missingAuthorizationRequests
+    assert response.memoryPatch is not None
+    assert any(item.action == "authorized_context_fallback" for item in response.toolAudit)
+
+
+def test_provider_falls_back_to_task_package_when_tool_call_is_rejected(monkeypatch):
+    clear_delegation_nonce_cache()
+    monkeypatch.setenv("SUFEN_PROVIDER_API_KEY", "provider-key")
+    monkeypatch.setenv("SUFEN_DELEGATION_HMAC_SECRET", DELEGATION_SECRET)
+    monkeypatch.setenv("SUFEN_BASE_URL", "https://provider.test/v1")
+    monkeypatch.setenv("SUFEN_TAVILY_API_KEY", "sufen-tavily")
+
+    import sufen.provider as provider
+
+    def fake_post(_url, _headers, _payload):
+        return {
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [{
+                        "id": "call-bad",
+                        "type": "function",
+                        "function": {"name": "not_allowed_tool", "arguments": "{}"},
+                    }],
+                }
+            }]
+        }
+
+    monkeypatch.setattr(provider, "_post_chat_completions", fake_post)
+    delegation = _signed_delegation_token(nonce="nonce-authorized-context-tool-fallback")
+    task = SuFenTaskPackage.model_validate(_property_task(
+        archiveContext={
+            "companyId": "company-ZYJ",
+            "authorizationId": "AUTH-P-1",
+            "archive": {
+                "id": "P-1",
+                "displayName": "赵姐房源",
+                "fields": {"业主姓名": "赵姐", "底价": "620万"},
+            },
+        },
+        delegationToken=delegation.model_dump(),
+    ))
+
+    response = answer_sufen("请读当前档案", task=task, settings=load_settings())
+
+    assert "赵姐" in response.answer
+    assert "620万" in response.answer
+    assert not response.missingAuthorizationRequests
+    assert response.memoryPatch is not None
+    assert any(item.action == "authorized_context_fallback" for item in response.toolAudit)
 
 
 def test_provider_tool_call_loop_executes_whitelist_tool(monkeypatch):
