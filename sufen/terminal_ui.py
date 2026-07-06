@@ -18,16 +18,67 @@ GOLD = "\033[1;38;2;199;160;106m"
 PALE = "\033[38;2;244;231;193m"
 MUTED = "\033[2m"
 RESET = "\033[0m"
+TEXT = "\033[38;2;232;226;214m"
+ACCENT = "\033[1;38;2;225;171;92m"
 
-SUFEN_MARK = [
-    "My Stand",
-    " ██████╗ ██╗   ██╗███████╗███████╗███╗   ██╗",
-    "██╔════╝ ██║   ██║██╔════╝██╔════╝████╗  ██║",
-    "╚█████╗  ██║   ██║█████╗  █████╗  ██╔██╗ ██║",
-    " ╚═══██╗ ██║   ██║██╔══╝  ██╔══╝  ██║╚██╗██║",
-    "██████╔╝ ╚██████╔╝██║     ███████╗██║ ╚████║",
-    "╚═════╝   ╚═════╝ ╚═╝     ╚══════╝╚═╝  ╚═══╝",
+PIXEL_COLORS = {
+    "W": "\033[38;2;239;232;216m",  # outline
+    "H": "\033[38;2;72;42;36m",     # dark head cloth
+    "G": "\033[38;2;205;144;65m",    # gold thread
+    "S": "\033[38;2;212;139;96m",    # skin
+    "s": "\033[38;2;170;93;65m",     # skin shadow
+    "E": "\033[38;2;238;237;213m",   # glowing eyes
+    "T": "\033[38;2;98;62;52m",      # nose/mouth
+    "M": "\033[38;2;156;160;156m",   # moustache
+    "B": "\033[38;2;205;210;202m",   # beard
+    "N": "\033[38;2;24;31;48m",      # navy robe
+    "F": "\033[38;2;183;118;55m",    # feather fan
+    "f": "\033[38;2;109;70;44m",     # fan rib
+    ".": "\033[38;2;124;120;116m",   # robe ornament
+}
+
+PIXEL_GLYPHS = {
+    "W": "█",
+    "H": "█",
+    "G": "▓",
+    "S": "█",
+    "s": "▓",
+    "E": "◆",
+    "T": "▓",
+    "M": "▒",
+    "B": "█",
+    "N": "█",
+    "F": "▓",
+    "f": "▒",
+    ".": "·",
+}
+
+PORTRAIT_PIXELS = [
+    "             WWWWWW             ",
+    "          WWHHHHHHHHWW          ",
+    "        WWHHHGGGGHHHHWW         ",
+    "       WHHHGGGGGGGGHHHW         ",
+    "      WHHHHHHHHHHHHHHHHW        ",
+    "      WHHHGGHHHHHHGGHHHW        ",
+    "       WWHHHSSSSSSHHHWW         ",
+    "        WSSSSSSSSSSSSW          ",
+    "        WssSEEESSEEEsW          ",
+    "        WSSSSEEEESSSSW          ",
+    "         WSSSSTTSSSSW           ",
+    "          WSSSTTTSSW            ",
+    "          WBMMMMMMBW            ",
+    "         WBBMMMMMMBBW           ",
+    "       WNBBBBBBBBBBBBNW         ",
+    "      WNNNBBBBBBBBBBNNNW        ",
+    "     WNNNNNNN..GG..NNNNNW       ",
+    "    WNNNNNNNN..GG..NNNNNNW      ",
+    "      WFFFFFFFFFFFFFFFFW         ",
+    "     WFFfFFfFFfFFfFFfFFFW       ",
+    "    WFFFFfFFFFfFFFFfFFFFW       ",
+    "   WFFFFFFFFFFFFFFFFFFFFFW       ",
 ]
+
+TAGLINE = "My Stand SuFen Agent"
 
 
 def _stdout_is_tty() -> bool:
@@ -49,14 +100,52 @@ def _center(text: str, width: int) -> str:
     return f"{' ' * left}{text}{' ' * (width - len(text) - left)}"
 
 
+def _clip(text: str, width: int) -> str:
+    if width <= 0:
+        return ""
+    if len(text) <= width:
+        return text
+    return text[: max(0, width - 1)] + "…"
+
+
+def _plain_cell(text: str, width: int, *, color: str = TEXT, enabled: bool) -> str:
+    clipped = _clip(text, width)
+    padded = clipped + (" " * max(0, width - len(clipped)))
+    return _color(padded, color, enabled=enabled)
+
+
+def _center_cell(text: str, width: int, *, color: str = TEXT, enabled: bool) -> str:
+    return _color(_center(_clip(text, width), width), color, enabled=enabled)
+
+
+def _pixel_line(pattern: str, width: int, *, enabled: bool) -> str:
+    pattern = pattern.rstrip()
+    left = max(0, (width - len(pattern)) // 2)
+    right = max(0, width - len(pattern) - left)
+    pieces = [" " * left]
+    for char in pattern:
+        if char == " ":
+            pieces.append(" ")
+            continue
+        glyph = PIXEL_GLYPHS.get(char, char)
+        color = PIXEL_COLORS.get(char, TEXT)
+        pieces.append(_color(glyph, color, enabled=enabled))
+    pieces.append(" " * right)
+    return "".join(pieces)
+
+
+def _rule(width: int) -> str:
+    return "─" * max(0, width)
+
+
 def _animate_startup(*, enabled: bool) -> None:
     if not enabled or os.environ.get("SUFEN_NO_ANIMATION") == "1":
         return
-    for frame in ("░░░", "▒▒▒", "▓▓▓", "███"):
+    for frame in ("░░", "▒▒", "▓▓", "██"):
         sys.stdout.write(f"\r{GOLD}{frame}{RESET} waking SuFen")
         sys.stdout.flush()
-        time.sleep(0.07)
-    sys.stdout.write("\r" + " " * 24 + "\r")
+        time.sleep(0.045)
+    sys.stdout.write("\r" + " " * 22 + "\r")
     sys.stdout.flush()
 
 
@@ -65,22 +154,95 @@ def print_startup_card(settings: SuFenSettings) -> None:
     color_enabled = _stdout_is_tty() and os.environ.get("NO_COLOR") != "1"
     _animate_startup(enabled=color_enabled)
 
-    art_width = max(len(line) for line in SUFEN_MARK)
-    box_width = min(max(art_width + 4, 62), max(62, _terminal_width()))
-    inner = box_width - 2
+    columns = max(64, _terminal_width())
     model_line = f"{settings.model} · API Usage Billing"
-    provider_line = f"provider: {settings.provider} · local archive strategist"
+    cwd = os.getcwd()
 
-    print(_color("╭" + "─" * inner + "╮", GOLD, enabled=color_enabled))
-    for index, line in enumerate(SUFEN_MARK):
-        code = GOLD if index == 0 else PALE
-        print(_color("│", GOLD, enabled=color_enabled) + _color(_center(line, inner), code, enabled=color_enabled) + _color("│", GOLD, enabled=color_enabled))
-    print(_color("├" + "─" * inner + "┤", GOLD, enabled=color_enabled))
-    print(_color("│", GOLD, enabled=color_enabled) + _center(f"SuFen v{__version__}", inner) + _color("│", GOLD, enabled=color_enabled))
-    print(_color("│", GOLD, enabled=color_enabled) + _center(model_line, inner) + _color("│", GOLD, enabled=color_enabled))
-    print(_color("│", GOLD, enabled=color_enabled) + _color(_center(provider_line, inner), MUTED, enabled=color_enabled) + _color("│", GOLD, enabled=color_enabled))
-    print(_color("╰" + "─" * inner + "╯", GOLD, enabled=color_enabled))
-    print("Welcome back! 直接问，也可以粘贴站内ID；按 Ctrl-D 退出。")
+    if columns >= 96:
+        frame_width = min(columns, max(104, columns - 2))
+        left_width = 42
+        right_width = max(32, frame_width - left_width - 3)
+        title = f"SuFen v{__version__}"
+        top_rule = max(0, frame_width - len(title) - 5)
+        print(
+            _color("╭─ ", GOLD, enabled=color_enabled)
+            + _color(title, ACCENT, enabled=color_enabled)
+            + _color(" " + ("─" * top_rule) + "╮", GOLD, enabled=color_enabled)
+        )
+        left_rows = [
+            _center_cell("Welcome back!", left_width, color=TEXT, enabled=color_enabled),
+            _center_cell(TAGLINE, left_width, color=GOLD, enabled=color_enabled),
+            _plain_cell("", left_width, enabled=color_enabled),
+            *[_pixel_line(line, left_width, enabled=color_enabled) for line in PORTRAIT_PIXELS],
+            _plain_cell("", left_width, enabled=color_enabled),
+            _center_cell(model_line, left_width, color=ACCENT, enabled=color_enabled),
+            _center_cell(_clip(cwd, left_width), left_width, color=MUTED, enabled=color_enabled),
+        ]
+        right_rows = [
+            _plain_cell("  Tips for getting started", right_width, color=ACCENT, enabled=color_enabled),
+            _plain_cell("  Run /help to see SuFen commands", right_width, enabled=color_enabled),
+            _plain_cell("  Run /new to start a clean session", right_width, enabled=color_enabled),
+            _plain_cell("  " + _rule(min(64, max(12, right_width - 4))), right_width, color=GOLD, enabled=color_enabled),
+            _plain_cell("  Recent activity", right_width, color=ACCENT, enabled=color_enabled),
+            _plain_cell("  No recent activity", right_width, color=MUTED, enabled=color_enabled),
+        ]
+        total_rows = max(len(left_rows), len(right_rows))
+        for index in range(total_rows):
+            left = left_rows[index] if index < len(left_rows) else _plain_cell("", left_width, enabled=color_enabled)
+            right = right_rows[index] if index < len(right_rows) else _plain_cell("", right_width, enabled=color_enabled)
+            print(
+                _color("│", GOLD, enabled=color_enabled)
+                + left
+                + _color("│", GOLD, enabled=color_enabled)
+                + right
+                + _color("│", GOLD, enabled=color_enabled)
+            )
+        print(_color("╰" + ("─" * (frame_width - 2)) + "╯", GOLD, enabled=color_enabled))
+    else:
+        inner = min(max(62, columns - 2), columns)
+        body = inner - 2
+        print(_color("╭─ " + _clip(f"SuFen v{__version__}", max(1, body - 4)) + " " + ("─" * max(0, body - len(f"SuFen v{__version__}") - 3)) + "╮", GOLD, enabled=color_enabled))
+        print(_color("│", GOLD, enabled=color_enabled) + _center_cell("Welcome back!", body, color=TEXT, enabled=color_enabled) + _color("│", GOLD, enabled=color_enabled))
+        print(_color("│", GOLD, enabled=color_enabled) + _center_cell(TAGLINE, body, color=GOLD, enabled=color_enabled) + _color("│", GOLD, enabled=color_enabled))
+        for line in PORTRAIT_PIXELS:
+            print(_color("│", GOLD, enabled=color_enabled) + _pixel_line(line, body, enabled=color_enabled) + _color("│", GOLD, enabled=color_enabled))
+        print(_color("├" + ("─" * body) + "┤", GOLD, enabled=color_enabled))
+        print(_color("│", GOLD, enabled=color_enabled) + _center_cell(model_line, body, color=ACCENT, enabled=color_enabled) + _color("│", GOLD, enabled=color_enabled))
+        print(_color("│", GOLD, enabled=color_enabled) + _center_cell(f"provider: {settings.provider} · draft-only", body, color=MUTED, enabled=color_enabled) + _color("│", GOLD, enabled=color_enabled))
+        print(_color("│", GOLD, enabled=color_enabled) + _center_cell("My Stand page injects authorized archive context.", body, color=TEXT, enabled=color_enabled) + _color("│", GOLD, enabled=color_enabled))
+        print(_color("╰" + ("─" * body) + "╯", GOLD, enabled=color_enabled))
+    print()
+
+
+def print_terminal_intro(settings: SuFenSettings) -> None:
+    color_enabled = _stdout_is_tty() and os.environ.get("NO_COLOR") != "1"
+    columns = max(64, _terminal_width())
+    status_width = min(columns, max(64, columns - 2))
+    model = settings.model.split("/")[-1]
+    meter_width = 10
+    print("Welcome to SuFen! Type your message or /help for commands.")
+    print("✦ Tip: 从 My Stand 档案页打开 SuFen，才能带入正式授权资料。")
+    print()
+    status = (
+        _color(" S ", GOLD, enabled=color_enabled)
+        + _color(model, TEXT, enabled=color_enabled)
+        + _color(" │ ", GOLD, enabled=color_enabled)
+        + _color("ctx --", MUTED, enabled=color_enabled)
+        + _color(" │ ", GOLD, enabled=color_enabled)
+        + _color("[", GOLD, enabled=color_enabled)
+        + _color("░" * meter_width, PALE, enabled=color_enabled)
+        + _color("] --", GOLD, enabled=color_enabled)
+        + _color(" │ ", GOLD, enabled=color_enabled)
+        + _color("0s", MUTED, enabled=color_enabled)
+        + _color(" │ ", GOLD, enabled=color_enabled)
+        + _color("⏲ 0s", MUTED, enabled=color_enabled)
+    )
+    print(status)
+    print(_rule(status_width))
+
+
+def terminal_prompt() -> str:
+    return "❯ "
 
 
 def _compact_query(text: str) -> str:

@@ -15,7 +15,13 @@ from sufen.config import bridge_inherited_runtime_home, load_settings
 from sufen.output import AuthorizationRequest, SuFenResponse, ToolAuditItem
 from sufen.provider import ProviderError
 from sufen.task_package import SuFenTaskPackage
-from sufen.terminal_ui import print_startup_card, print_terminal_response, terminal_local_response
+from sufen.terminal_ui import (
+    print_startup_card,
+    print_terminal_intro,
+    print_terminal_response,
+    terminal_local_response,
+    terminal_prompt,
+)
 
 
 def _stdin_is_tty() -> bool:
@@ -55,13 +61,24 @@ def _cmd_chat(args: argparse.Namespace) -> int:
     if not query and _stdin_is_tty():
         settings = load_settings()
         print_startup_card(settings)
+        print_terminal_intro(settings)
         while True:
             try:
-                query = input("sufen> ").strip()
+                query = input(terminal_prompt()).strip()
             except (EOFError, KeyboardInterrupt):
                 print()
                 return 0
             if not query:
+                continue
+            if query in {"/quit", "/exit"}:
+                return 0
+            if query == "/new":
+                print("已开始新的本机终端会话；正式档案上下文仍需要从 My Stand 页面注入。")
+                print_terminal_intro(settings)
+                continue
+            if query == "/help":
+                print("SuFen commands: /help, /new, /quit")
+                print("裸终端适合通用策略讨论和资料钥匙识别；正式档案分析请从 My Stand 档案页打开 SuFen。")
                 continue
             local_response = terminal_local_response(query, settings) if task is None and not args.fake else None
             if local_response is not None:
