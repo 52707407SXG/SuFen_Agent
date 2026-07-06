@@ -15,6 +15,7 @@ from sufen.config import bridge_inherited_runtime_home, load_settings
 from sufen.output import AuthorizationRequest, SuFenResponse, ToolAuditItem
 from sufen.provider import ProviderError
 from sufen.task_package import SuFenTaskPackage
+from sufen.terminal_ui import print_startup_card, print_terminal_response, terminal_local_response
 
 
 def _stdin_is_tty() -> bool:
@@ -52,9 +53,8 @@ def _cmd_chat(args: argparse.Namespace) -> int:
     task = _load_task_package(args.task_package)
     query = (args.query or "").strip()
     if not query and _stdin_is_tty():
-        print(f"SuFen-Agent v{__version__}")
-        print("Local SuFen chat. Type a question and press Enter. Ctrl-D or Ctrl-C exits.")
-        print("Without a My Stand taskPackage, SuFen will fail closed instead of guessing archive facts.")
+        settings = load_settings()
+        print_startup_card(settings)
         while True:
             try:
                 query = input("sufen> ").strip()
@@ -63,7 +63,27 @@ def _cmd_chat(args: argparse.Namespace) -> int:
                 return 0
             if not query:
                 continue
-            print(_answer_as_json(query, task=task, force_fake=bool(args.fake)))
+            local_response = terminal_local_response(query, settings) if task is None and not args.fake else None
+            if local_response is not None:
+                print_terminal_response(local_response)
+            else:
+                try:
+                    response = answer_sufen(query, task=task, settings=settings, force_fake=bool(args.fake))
+                except (ProviderError, ValueError) as exc:
+                    response = SuFenResponse(
+                        answer=FAIL_CLOSED_MESSAGE,
+                        missingAuthorizationRequests=[
+                            AuthorizationRequest(
+                                reason="unsafe_task_package",
+                                acceptableRefs=["My Stand backend-injected taskPackage"],
+                                message=FAIL_CLOSED_MESSAGE,
+                            )
+                        ],
+                        toolAudit=[
+                            ToolAuditItem(tool="task_package", action="validate_scope", status=f"rejected: {exc}")
+                        ],
+                    )
+                print_terminal_response(response)
         return 0
     print(_answer_as_json(query, task=task, force_fake=bool(args.fake)))
     return 0

@@ -1652,10 +1652,12 @@ def test_sufen_without_args_enters_local_chat(monkeypatch, capsys):
     import builtins
     import sufen.cli as sufen_cli
 
-    monkeypatch.setenv("SUFEN_FAKE_PROVIDER", "1")
+    monkeypatch.setenv("SUFEN_PROVIDER", "deepseek")
+    monkeypatch.setenv("SUFEN_MODEL", "deepseek-v4-pro")
+    monkeypatch.setenv("SUFEN_FAKE_PROVIDER", "0")
     monkeypatch.setattr(sufen_config, "_candidate_env_files", lambda: [])
     monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))
-    lines = iter(["AUTH-P-1", ""])
+    lines = iter(["你好，你是谁", "AUTH-P-1", ""])
 
     def fake_input(_: str) -> str:
         try:
@@ -1670,11 +1672,12 @@ def test_sufen_without_args_enters_local_chat(monkeypatch, capsys):
 
     assert sufen_cli.main([]) == 0
     output = capsys.readouterr().out
-    assert "SuFen-Agent v" in output
-    assert "Local SuFen chat" in output
-    payload = json.loads(output[output.index("{"):output.rindex("}") + 1])
-    assert "SuFen" in payload["answer"]
-    assert payload["evidenceUsed"][0]["source"] == "AUTH-P-1"
+    assert "SuFen v" in output
+    assert "deepseek-v4-pro · API Usage Billing" in output
+    assert "我是 SuFen，My Stand 的档案军师" in output
+    assert "AUTH-P-1" in output
+    assert "裸终端入口需要 My Stand 后端注入 taskPackage" in output
+    assert "missingAuthorizationRequests" not in output
 
 
 def test_sufen_chat_unsafe_task_package_fails_closed(tmp_path):
