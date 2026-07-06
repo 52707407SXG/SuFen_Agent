@@ -1181,6 +1181,12 @@ web = [
     { name = "uvicorn", extra = ["standard"] },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "certifi", specifier = "==2026.5.20" },
@@ -1228,6 +1234,12 @@ requires-dist = [
     { name = "websockets", specifier = "==15.0.1" },
 ]
 provides-extras = ["dev", "web", "all"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = "==9.0.2" },
+    { name = "pytest-asyncio", specifier = "==1.3.0" },
+]
 
 [[package]]
 name = "tenacity"
