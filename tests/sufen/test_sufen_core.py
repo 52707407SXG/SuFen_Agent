@@ -984,7 +984,13 @@ def test_provider_normalizes_draft_and_audit_shapes(monkeypatch):
             "missingAuthorizationRequests": [],
             "eventDrafts": [{"title": "约客户看房", "description": "明天上午确认金融城房源"}],
             "fieldPatchDrafts": [{"field": "维护要点", "after": "先确认预算弹性和看房节奏。"}],
-            "memoryPatch": {"scope": "company-ZYJ/operators/1001/subjects/property/P-1", "businessFacts": ["客户关注金融城"]},
+            "memoryPatch": {
+                "scope": "company-ZYJ/operators/1001/subjects/property/P-1",
+                "businessFacts": ["客户关注金融城"],
+                "brokerAdaptation": "经纪人需要先给数据再沟通",
+                "openQuestions": "底价弹性待确认",
+                "sourceRefs": "AUTH-P-1",
+            },
             "toolAudit": [{"tool": "mystand_archive_read", "summary": "读取客户字段"}],
         }
         return {"choices": [{"message": {"content": json.dumps(content, ensure_ascii=False)}}]}
@@ -1002,6 +1008,9 @@ def test_provider_normalizes_draft_and_audit_shapes(monkeypatch):
     assert response.memoryPatch is not None
     assert response.memoryPatch.scope == {}
     assert response.memoryPatch.businessFacts == ["客户关注金融城"]
+    assert response.memoryPatch.brokerAdaptation == ["经纪人需要先给数据再沟通"]
+    assert response.memoryPatch.openQuestions == ["底价弹性待确认"]
+    assert response.memoryPatch.sourceRefs == ["AUTH-P-1"]
     assert response.toolAudit[0].tool == "mystand.archive.read"
     assert response.toolAudit[0].action == "provider_report"
     assert response.toolAudit[0].status == "读取客户字段"

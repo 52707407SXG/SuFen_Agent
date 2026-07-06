@@ -197,6 +197,14 @@ def _normalize_event_draft(item: Any, index: int) -> dict[str, Any]:
     }
 
 
+def _normalize_memory_list(value: Any) -> list[str]:
+    if value in (None, "", [], {}):
+        return []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return [str(value).strip()]
+
+
 def _normalize_provider_response_payload(payload: dict[str, Any]) -> dict[str, Any]:
     clean = dict(payload)
     if isinstance(clean.get("evidenceUsed"), list):
@@ -223,6 +231,11 @@ def _normalize_provider_response_payload(payload: dict[str, Any]) -> dict[str, A
         memory_patch = dict(clean["memoryPatch"])
         if not isinstance(memory_patch.get("scope"), dict):
             memory_patch["scope"] = {}
+        for key in ("businessFacts", "strategyObservations", "brokerAdaptation", "openQuestions", "sourceRefs"):
+            memory_patch[key] = _normalize_memory_list(memory_patch.get(key))
+        for key in ("lastSummary", "memoryIndexText"):
+            if memory_patch.get(key) not in (None, ""):
+                memory_patch[key] = str(memory_patch.get(key)).strip()
         clean["memoryPatch"] = memory_patch
     return clean
 
