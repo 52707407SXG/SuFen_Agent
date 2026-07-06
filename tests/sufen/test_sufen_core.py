@@ -1385,6 +1385,9 @@ def test_runbook_v1_chat_smoke_includes_delegation_token():
     assert "AgentDelegationToken" in runbook
     assert "sign_delegation_token" in runbook
     assert "SUFEN_DELEGATION_HMAC_SECRET" in runbook
+    assert "sufen-smoke-local" not in runbook
+    assert "import uuid" in runbook
+    assert '"nonce": "sufen-smoke-" + uuid.uuid4().hex' in runbook
     assert "--data-binary @/tmp/sufen-smoke-request.json" in runbook
 
 

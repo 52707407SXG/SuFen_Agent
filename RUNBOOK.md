@@ -57,6 +57,7 @@ set +a
 python - <<'PY' > /tmp/sufen-smoke-request.json
 import json
 import os
+import uuid
 from datetime import datetime, timedelta, timezone
 
 from sufen.task_package import AgentDelegationToken, sign_delegation_token
@@ -90,7 +91,7 @@ delegation = AgentDelegationToken.model_validate({
     "subject": task["subject"],
     "allowedActions": ["analyze", "suggest", "eventDraft", "fieldPatchDraft", "memoryPatch"],
     "expiresAt": (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat(),
-    "nonce": "sufen-smoke-local",
+    "nonce": "sufen-smoke-" + uuid.uuid4().hex,
     "signature": "pending",
 })
 task["delegationToken"] = delegation.model_copy(update={
