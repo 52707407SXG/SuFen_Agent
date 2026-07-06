@@ -13,6 +13,8 @@
 - `sufen/session.py`: SuFen-native JSONL session/transcript helpers.
 - `sufen/time.py`: SuFen-owned timezone-aware clock used by prompt and compression paths.
 - `sufen/fake_provider.py`: deterministic fake provider for smoke tests.
+- `sufen/provider.py`: production OpenAI-compatible provider path with SuFen system policy, taskPackage, whitelist tool schemas, and scoped memory constraints.
+- `sufen/chat.py`: explicit fake-vs-production routing; production is default, fake is opt-in.
 - `sufen/cli.py`: public `sufen` command.
 - `sufen/server.py`: FastAPI app with `/health` and task-package-gated `/v1/chat`.
 - `sufen/build.py`: build-time whitelist filter so ignored upstream reference files cannot enter the SuFen wheel.

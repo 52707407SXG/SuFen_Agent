@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import tomllib
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -12,6 +13,7 @@ from fastapi.testclient import TestClient
 from agent.system_prompt import build_system_prompt, build_system_prompt_parts
 from agent.transports.chat_completions import ChatCompletionsTransport
 from sufen.auth import FAIL_CLOSED_MESSAGE, extract_authorization_refs
+from sufen.chat import answer_sufen
 import sufen.config as sufen_config
 from sufen.config import load_settings
 from sufen.fake_provider import answer_with_fake_provider
@@ -19,7 +21,13 @@ from sufen.memory import draft_memory_patch, memory_path
 from sufen.output import SuFenResponse
 from sufen.server import create_app
 from sufen.session import SuFenSession
-from sufen.task_package import AgentDelegationToken, SuFenTaskPackage, ensure_safe_actions
+from sufen.task_package import (
+    AgentDelegationToken,
+    SuFenTaskPackage,
+    clear_delegation_nonce_cache,
+    ensure_safe_actions,
+    sign_delegation_token,
+)
 from toolsets import SUFEN_TOOL_NAMES, get_toolset_names, resolve_toolset, validate_toolset
 from tools.registry import registry
 import tools.sufen_mystand_tools  # noqa: F401
@@ -28,6 +36,47 @@ import tools.sufen_mystand_tools  # noqa: F401
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LEGACY_BRAND = "Her" + "mes"
 LEGACY_LOWER = LEGACY_BRAND.lower()
+DELEGATION_SECRET = "unit-test-" + "delegation-secret"
+
+
+def _property_task(**updates):
+    data = {
+        "operator": {"userId": "1001", "name": "经纪人A", "role": "broker"},
+        "subject": {"type": "property", "id": "P-1"},
+        "scene": "房源维护",
+        "archiveContext": {
+            "companyId": "company-ZYJ",
+            "baseInfo": {"title": "阳光花园三居", "askingPrice": "480万"},
+            "propertyNote": "业主说先按原价挂一周。",
+            "eventSummary": ["近三天有两组看房但无明确报价"],
+        },
+        "brokerProfile": {"capabilityStage": "新手"},
+        "knowledgeGraphRefs": ["KGREF-property-maintenance"],
+        "scopedMemoryKey": "company-ZYJ/operators/1001/subjects/property/P-1",
+    }
+    data.update(updates)
+    return data
+
+
+def _signed_delegation_token(
+    *,
+    subject: dict | None = None,
+    operator_user_id: str = "1001",
+    allowed_actions: list[str] | None = None,
+    expires_at: datetime | None = None,
+    nonce: str = "nonce-1",
+    secret: str = DELEGATION_SECRET,
+) -> AgentDelegationToken:
+    token = AgentDelegationToken.model_validate({
+        "actorAgent": "lucan",
+        "operatorUserId": operator_user_id,
+        "subject": subject or {"type": "property", "id": "P-1"},
+        "allowedActions": allowed_actions or ["analyze", "suggest"],
+        "expiresAt": (expires_at or (datetime.now(timezone.utc) + timedelta(hours=1))).isoformat(),
+        "nonce": nonce,
+        "signature": "pending",
+    })
+    return token.model_copy(update={"signature": sign_delegation_token(token, secret)})
 
 
 def test_sufen_env_does_not_reuse_miner_key(monkeypatch):
@@ -492,6 +541,53 @@ def test_output_schema_and_fake_provider_with_task_package():
     assert payload.toolAudit
 
 
+def test_production_chat_uses_real_provider_not_fake(monkeypatch):
+    monkeypatch.setenv("SUFEN_PROVIDER", "deepseek")
+    monkeypatch.setenv("SUFEN_MODEL", "deepseek-v4-pro")
+    monkeypatch.setenv("SUFEN_API_KEY", "provider-secret")
+    monkeypatch.setenv("SUFEN_BASE_URL", "https://provider.test/v1")
+    monkeypatch.setenv("SUFEN_FAKE_PROVIDER", "0")
+    monkeypatch.setenv("SUFEN_TAVILY_API_KEY", "sufen-tavily")
+
+    import sufen.fake_provider as fake_provider
+    import sufen.provider as provider
+
+    def fail_if_fake(*_args, **_kwargs):
+        raise AssertionError("production path must not call fake_provider")
+
+    captured = {}
+
+    def fake_post(url, headers, payload):
+        captured["url"] = url
+        captured["headers"] = headers
+        captured["payload"] = payload
+        content = {
+            "answer": "real provider answer",
+            "evidenceUsed": [],
+            "missingAuthorizationRequests": [],
+            "eventDrafts": [],
+            "fieldPatchDrafts": [],
+            "memoryPatch": None,
+            "toolAudit": [{"tool": "provider.stub", "action": "respond", "status": "ok", "draftOnly": True}],
+        }
+        return {"choices": [{"message": {"content": json.dumps(content, ensure_ascii=False)}}]}
+
+    monkeypatch.setattr(fake_provider, "answer_with_fake_provider", fail_if_fake)
+    monkeypatch.setattr(provider, "_post_chat_completions", fake_post)
+
+    task = SuFenTaskPackage.model_validate(_property_task())
+    response = answer_sufen("AUTH-P-1 KGREF-property-maintenance", task=task, settings=load_settings())
+
+    assert response.answer == "real provider answer"
+    assert captured["url"] == "https://provider.test/v1/chat/completions"
+    assert captured["headers"]["Authorization"] == "Bearer provider-secret"
+    assert "你是 SuFen" in captured["payload"]["messages"][0]["content"]
+    assert "scoped memory" in captured["payload"]["messages"][0]["content"]
+    exposed = {item["function"]["name"] for item in captured["payload"]["tools"]}
+    assert exposed == set(SUFEN_TOOL_NAMES)
+    assert any(item.tool == "provider.chat_completions" for item in response.toolAudit)
+
+
 def test_first_property_archive_scenario_outputs_drafts_and_memory_patch():
     task = SuFenTaskPackage.model_validate({
         "operator": {"userId": "1001", "name": "经纪人A", "role": "broker"},
@@ -543,27 +639,20 @@ def test_first_property_archive_scenario_respects_allowed_actions():
 
 
 def test_task_package_denied_actions_and_delegation_token():
+    clear_delegation_nonce_cache()
     subject = {"type": "property", "id": "P-1"}
-    token = AgentDelegationToken.model_validate({
-        "actorAgent": "lucan",
-        "operatorUserId": "1001",
-        "subject": subject,
-        "allowedActions": ["analyze", "suggest"],
-        "expiresAt": "2026-07-06T23:59:00Z",
-        "nonce": "nonce-1",
-        "signature": "test-signature",
-    })
-    assert token.issuer == "mystand-core"
-    assert token.audience == "sufen-agent"
+    delegation = _signed_delegation_token(subject=subject, nonce="nonce-safe")
+    assert delegation.issuer == "mystand-core"
+    assert delegation.audience == "sufen-agent"
 
     task = SuFenTaskPackage.model_validate({
         "operator": {"userId": "1001", "name": "经纪人A", "role": "broker"},
         "subject": subject,
         "scene": "房源维护",
         "allowedActions": ["analyze", "suggest"],
-        "delegationToken": token.model_dump(),
+        "delegationToken": delegation.model_dump(),
     })
-    ensure_safe_actions(task)
+    ensure_safe_actions(task, delegation_secret=DELEGATION_SECRET)
 
     mismatched_token_task = task.model_copy(update={
         "operator": task.operator.model_copy(update={"userId": "1002"}),
@@ -586,19 +675,88 @@ def test_task_package_denied_actions_and_delegation_token():
         raise AssertionError("missing denied actions must fail closed")
 
 
+def test_delegation_token_security_checks():
+    subject = {"type": "property", "id": "P-1"}
+
+    clear_delegation_nonce_cache()
+    expired = _signed_delegation_token(
+        subject=subject,
+        expires_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+        nonce="nonce-expired",
+    )
+    expired_task = SuFenTaskPackage.model_validate({
+        **_property_task(),
+        "allowedActions": ["analyze", "suggest"],
+        "delegationToken": expired.model_dump(),
+    })
+    try:
+        ensure_safe_actions(expired_task, delegation_secret=DELEGATION_SECRET)
+    except ValueError as exc:
+        assert "expired" in str(exc)
+    else:
+        raise AssertionError("expired token must fail closed")
+
+    clear_delegation_nonce_cache()
+    wrong_subject = _signed_delegation_token(subject={"type": "property", "id": "P-2"}, nonce="nonce-subject")
+    wrong_subject_task = SuFenTaskPackage.model_validate({
+        **_property_task(),
+        "allowedActions": ["analyze", "suggest"],
+        "delegationToken": wrong_subject.model_dump(),
+    })
+    try:
+        ensure_safe_actions(wrong_subject_task, delegation_secret=DELEGATION_SECRET)
+    except ValueError as exc:
+        assert "subject" in str(exc)
+    else:
+        raise AssertionError("subject mismatch must fail closed")
+
+    clear_delegation_nonce_cache()
+    wrong_signature = _signed_delegation_token(subject=subject, nonce="nonce-signature")
+    wrong_signature = wrong_signature.model_copy(update={"signature": "hmac-sha256:bad"})
+    wrong_signature_task = SuFenTaskPackage.model_validate({
+        **_property_task(),
+        "allowedActions": ["analyze", "suggest"],
+        "delegationToken": wrong_signature.model_dump(),
+    })
+    try:
+        ensure_safe_actions(wrong_signature_task, delegation_secret=DELEGATION_SECRET)
+    except ValueError as exc:
+        assert "signature" in str(exc)
+    else:
+        raise AssertionError("bad signature must fail closed")
+
+    clear_delegation_nonce_cache()
+    replay = _signed_delegation_token(subject=subject, nonce="nonce-replay")
+    replay_task = SuFenTaskPackage.model_validate({
+        **_property_task(),
+        "allowedActions": ["analyze", "suggest"],
+        "delegationToken": replay.model_dump(),
+    })
+    ensure_safe_actions(replay_task, delegation_secret=DELEGATION_SECRET)
+    try:
+        ensure_safe_actions(replay_task, delegation_secret=DELEGATION_SECRET)
+    except ValueError as exc:
+        assert "nonce" in str(exc)
+    else:
+        raise AssertionError("nonce replay must fail closed")
+
+
 def test_health_and_fake_chat_smoke(monkeypatch):
     monkeypatch.setenv("SUFEN_PROVIDER", "deepseek")
     monkeypatch.setenv("SUFEN_MODEL", "deepseek-v4-pro")
+    monkeypatch.setenv("SUFEN_API_KEY", "server-secret")
+    monkeypatch.setenv("SUFEN_FAKE_PROVIDER", "1")
     client = TestClient(create_app())
+    headers = {"Authorization": "Bearer server-secret"}
     health = client.get("/health")
     assert health.status_code == 200
     assert health.json()["service"] == "sufen-agent"
 
-    missing_task = client.post("/v1/chat", json={"query": "AUTH-P-1 这个房源怎么维护"})
+    missing_task = client.post("/v1/chat", headers=headers, json={"query": "AUTH-P-1 这个房源怎么维护"})
     assert missing_task.status_code == 200
     assert missing_task.json()["missingAuthorizationRequests"][0]["reason"] == "missing_task_package"
 
-    chat = client.post("/v1/chat", json={
+    chat = client.post("/v1/chat", headers=headers, json={
         "query": "AUTH-P-1 KGREF-property-maintenance 这个房源怎么维护",
         "taskPackage": {
             "operator": {"userId": "1001", "name": "经纪人A", "role": "broker"},
@@ -617,7 +775,7 @@ def test_health_and_fake_chat_smoke(monkeypatch):
     assert "answer" in chat.json()
     assert chat.json()["eventDrafts"]
 
-    unsafe = client.post("/v1/chat", json={
+    unsafe = client.post("/v1/chat", headers=headers, json={
         "query": "AUTH-P-1 KGREF-property-maintenance",
         "taskPackage": {
             "operator": {"userId": "1001", "name": "经纪人A", "role": "broker"},
@@ -632,6 +790,46 @@ def test_health_and_fake_chat_smoke(monkeypatch):
     assert unsafe_payload["answer"] == FAIL_CLOSED_MESSAGE
     assert unsafe_payload["missingAuthorizationRequests"][0]["reason"] == "unsafe_task_package"
     assert unsafe_payload["toolAudit"][0]["status"].startswith("rejected:")
+
+
+def test_http_chat_requires_service_api_key(monkeypatch):
+    monkeypatch.setenv("SUFEN_API_KEY", "server-secret")
+    monkeypatch.setenv("SUFEN_FAKE_PROVIDER", "1")
+    client = TestClient(create_app())
+
+    assert client.post("/v1/chat", json={"query": "AUTH-P-1"}).status_code == 401
+    assert client.post(
+        "/v1/chat",
+        headers={"Authorization": "Bearer wrong"},
+        json={"query": "AUTH-P-1"},
+    ).status_code == 403
+    assert client.post(
+        "/v1/chat",
+        headers={"X-SuFen-API-Key": "wrong"},
+        json={"query": "AUTH-P-1"},
+    ).status_code == 403
+
+    ok = client.post(
+        "/v1/chat",
+        headers={"X-SuFen-API-Key": "server-secret"},
+        json={"query": "AUTH-P-1"},
+    )
+    assert ok.status_code == 200
+    assert ok.json()["missingAuthorizationRequests"][0]["reason"] == "missing_task_package"
+
+
+def test_http_chat_fails_closed_when_server_key_unconfigured(monkeypatch):
+    monkeypatch.delenv("SUFEN_API_KEY", raising=False)
+    monkeypatch.setenv("SUFEN_FAKE_PROVIDER", "1")
+    monkeypatch.setattr(sufen_config, "_candidate_env_files", lambda: [])
+    client = TestClient(create_app())
+    response = client.post(
+        "/v1/chat",
+        headers={"Authorization": "Bearer anything"},
+        json={"query": "AUTH-P-1"},
+    )
+    assert response.status_code == 503
+    assert response.json()["detail"]["error"] == "sufen_api_key_not_configured"
 
 
 def test_sufen_version_smoke():
@@ -660,6 +858,7 @@ def test_sufen_chat_unsafe_task_package_fails_closed(tmp_path):
             "-m",
             "sufen.cli",
             "chat",
+            "--fake",
             "-q",
             "AUTH-P-1 KGREF-property-maintenance",
             "--task-package",

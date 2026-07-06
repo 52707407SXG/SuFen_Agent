@@ -21,17 +21,19 @@ SUFEN_PROVIDER=deepseek
 SUFEN_MODEL=deepseek-v4-pro
 SUFEN_API_KEY=
 SUFEN_BASE_URL=
+SUFEN_DELEGATION_HMAC_SECRET=
 SUFEN_TAVILY_API_KEY=
 SUFEN_MEMORY_ROOT=/var/lib/sufen-agent/memory
 SUFEN_BIND_HOST=127.0.0.1
 SUFEN_PORT=8791
+SUFEN_FAKE_PROVIDER=0
 ```
 
 ## Start
 
 ```bash
 sufen --version
-sufen chat -q "AUTH-P-1001 这个业主现在该怎么跟"
+sufen chat -q "AUTH-P-1001 这个业主现在该怎么跟" --task-package /path/to/task-package.json
 sufen serve
 ```
 
@@ -46,6 +48,7 @@ Task-package chat smoke:
 ```bash
 curl -s http://127.0.0.1:8791/v1/chat \
   -H 'content-type: application/json' \
+  -H "Authorization: Bearer $SUFEN_API_KEY" \
   -d '{
     "query": "AUTH-P-1 KGREF-property-maintenance 这个房源怎么维护",
     "taskPackage": {
@@ -67,6 +70,12 @@ curl -s http://127.0.0.1:8791/v1/chat \
   }'
 ```
 
+Local fake-provider dry-run:
+
+```bash
+sufen chat --fake -q "AUTH-P-1 KGREF-property-maintenance 这个房源怎么维护" --task-package /path/to/task-package.json
+```
+
 ## Optional Node Workspace
 
 Node is not required to run SuFen v0.1.0. The root `package.json` is retained only for future asset/tooling work. It declares no dependencies, and the root `package-lock.json` is intentionally minimal.
@@ -82,7 +91,7 @@ python scripts/sufen_rebrand_check.py
 python scripts/sufen_secret_scan.py
 pytest tests/sufen
 sufen --version
-sufen chat -q "AUTH-P-1 KGREF-property-maintenance 这个房源怎么维护"
+sufen chat --fake -q "AUTH-P-1 KGREF-property-maintenance 这个房源怎么维护" --task-package /path/to/task-package.json
 python -m pip wheel . --no-deps --no-build-isolation -w /tmp/sufen-wheel-check
 ```
 

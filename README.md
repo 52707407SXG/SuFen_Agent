@@ -18,7 +18,7 @@ cp .env.example .env
 
 ```bash
 sufen --version
-sufen chat -q "AUTH-P-1001 这个业主现在该怎么跟"
+sufen chat -q "AUTH-P-1001 这个业主现在该怎么跟" --task-package /path/to/task-package.json
 sufen serve
 ```
 
@@ -33,10 +33,18 @@ curl http://127.0.0.1:8791/health
 scoped memory key 后，第一版业主房源档案场景会返回策略建议、事件草稿、
 字段 diff 草稿和 memoryPatch。
 
+生产模式默认调用 `SUFEN_PROVIDER` / `SUFEN_MODEL` / `SUFEN_API_KEY` /
+`SUFEN_BASE_URL` 指向的 OpenAI-compatible provider。测试或本地 dry-run
+可以显式使用 `sufen chat --fake` 或 `SUFEN_FAKE_PROVIDER=1`。
+`/v1/chat` 必须带 `Authorization: Bearer <SUFEN_API_KEY>` 或
+`X-SuFen-API-Key: <SUFEN_API_KEY>`。
+
 ## First-Release Boundaries
 
 - 只读取 `SUFEN_*` 环境变量。
 - `SUFEN_API_KEY` 不 fallback 到 Miner、小伴或其他 Agent key。
+- `/v1/chat` 校验服务间 API key；`SUFEN_API_KEY` 未配置时生产对话 fail closed。
+- delegationToken 使用 `SUFEN_DELEGATION_HMAC_SECRET` 做 HMAC 校验，并检查过期时间、subject/operator、allowedActions 和 nonce 重放。
 - 所有 My Stand 写入都只生成草稿，由前端展示并由后端在用户确认后写入。
 - scoped memory 路径使用稳定 ID，不使用中文名做主路径。
 - 默认工具集是 SuFen 白名单：授权解析、授权档案读取适配位、知识图谱读取适配位、解析、web search/extract、scoped memory search/patch draft、事件草稿、字段 diff 草稿。

@@ -10,9 +10,10 @@ from pathlib import Path
 
 from sufen import __version__
 from sufen.auth import FAIL_CLOSED_MESSAGE
+from sufen.chat import answer_sufen
 from sufen.config import bridge_inherited_runtime_home, load_settings
-from sufen.fake_provider import answer_with_fake_provider
 from sufen.output import AuthorizationRequest, SuFenResponse, ToolAuditItem
+from sufen.provider import ProviderError
 from sufen.task_package import SuFenTaskPackage
 
 
@@ -26,8 +27,8 @@ def _load_task_package(path: str | None) -> SuFenTaskPackage | None:
 def _cmd_chat(args: argparse.Namespace) -> int:
     task = _load_task_package(args.task_package)
     try:
-        result = answer_with_fake_provider(args.query or "", task=task)
-    except ValueError as exc:
+        result = answer_sufen(args.query or "", task=task, force_fake=bool(args.fake))
+    except (ProviderError, ValueError) as exc:
         result = SuFenResponse(
             answer=FAIL_CLOSED_MESSAGE,
             missingAuthorizationRequests=[
@@ -74,6 +75,7 @@ def build_parser() -> argparse.ArgumentParser:
     chat = subparsers.add_parser("chat", help="Run a local SuFen dry-run conversation")
     chat.add_argument("-q", "--query", default="", help="User question or My Stand prompt")
     chat.add_argument("--task-package", help="Path to a My Stand task package JSON file")
+    chat.add_argument("--fake", action="store_true", help="Use deterministic fake provider for tests and dry-runs")
     chat.set_defaults(func=_cmd_chat)
 
     serve = subparsers.add_parser("serve", help="Start SuFen HTTP API")

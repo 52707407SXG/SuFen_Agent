@@ -22,6 +22,8 @@ class SuFenSettings:
     model: str
     api_key: str
     base_url: str
+    fake_provider: bool
+    delegation_hmac_secret: str
     tavily_api_key: str
     memory_root: Path
     bind_host: str
@@ -75,6 +77,11 @@ def _env(name: str, default: str = "") -> str:
     return _read_sufen_dotenv_values().get(name, default).strip()
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = _env(name, "1" if default else "0").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 def get_sufen_home() -> Path:
     return Path(_env("SUFEN_HOME", str(DEFAULT_HOME))).expanduser()
 
@@ -92,6 +99,8 @@ def load_settings() -> SuFenSettings:
         model=_env("SUFEN_MODEL", "deepseek-v4-pro"),
         api_key=_env("SUFEN_API_KEY"),
         base_url=_env("SUFEN_BASE_URL"),
+        fake_provider=_env_bool("SUFEN_FAKE_PROVIDER", False),
+        delegation_hmac_secret=_env("SUFEN_DELEGATION_HMAC_SECRET"),
         tavily_api_key=_env("SUFEN_TAVILY_API_KEY"),
         memory_root=Path(_env("SUFEN_MEMORY_ROOT", str(DEFAULT_MEMORY_ROOT))).expanduser(),
         bind_host=_env("SUFEN_BIND_HOST", "127.0.0.1"),

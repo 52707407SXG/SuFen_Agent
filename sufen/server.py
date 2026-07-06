@@ -3,22 +3,51 @@
 from __future__ import annotations
 
 import os
+import secrets
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request, status
 from pydantic import BaseModel
 
 from sufen import __version__
 from sufen.auth import FAIL_CLOSED_MESSAGE
+from sufen.chat import answer_sufen
 from sufen.config import load_settings
-from sufen.fake_provider import answer_with_fake_provider
 from sufen.output import AuthorizationRequest, SuFenResponse, ToolAuditItem
+from sufen.provider import ProviderError
 from sufen.task_package import SuFenTaskPackage
 
 
 class ChatRequest(BaseModel):
     query: str
     taskPackage: SuFenTaskPackage | None = None
+
+
+def _request_api_key(request: Request) -> str:
+    auth = (request.headers.get("authorization") or "").strip()
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return (request.headers.get("x-sufen-api-key") or "").strip()
+
+
+def _require_chat_auth(request: Request, configured_key: str) -> None:
+    if not configured_key:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"error": "sufen_api_key_not_configured"},
+        )
+    supplied = _request_api_key(request)
+    if not supplied:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"error": "missing_sufen_api_key"},
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if not secrets.compare_digest(supplied, configured_key):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"error": "invalid_sufen_api_key"},
+        )
 
 
 def create_app() -> FastAPI:
@@ -37,7 +66,8 @@ def create_app() -> FastAPI:
         }
 
     @app.post("/v1/chat")
-    async def chat(request: ChatRequest) -> dict[str, Any]:
+    async def chat(request: ChatRequest, raw_request: Request) -> dict[str, Any]:
+        _require_chat_auth(raw_request, settings.api_key)
         if request.taskPackage is None:
             response = SuFenResponse(
                 answer=FAIL_CLOSED_MESSAGE,
@@ -54,8 +84,8 @@ def create_app() -> FastAPI:
             )
             return response.model_dump(mode="json")
         try:
-            response = answer_with_fake_provider(request.query, task=request.taskPackage)
-        except ValueError as exc:
+            response = answer_sufen(request.query, task=request.taskPackage, settings=settings)
+        except (ProviderError, ValueError) as exc:
             response = SuFenResponse(
                 answer=FAIL_CLOSED_MESSAGE,
                 missingAuthorizationRequests=[
