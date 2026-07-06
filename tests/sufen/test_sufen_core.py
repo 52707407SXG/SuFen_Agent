@@ -545,6 +545,9 @@ def test_sufen_policy_enters_actual_system_prompt(monkeypatch):
     assert "你是 SuFen" in parts["stable"]
     assert "资料优先" in parts["stable"]
     assert "验收要求" in parts["stable"]
+    assert "companyId + operatorUserId + subjectType + subjectId" in parts["stable"]
+    assert "不重要内容一律视为垃圾" in parts["stable"]
+    assert "原始聊天、长文、图片 OCR、语音转写、附件全文" in parts["stable"]
 
 
 def test_sufen_policy_builds_without_inherited_runtime(monkeypatch):
@@ -573,6 +576,8 @@ def test_sufen_policy_reaches_chat_completion_request_system_message(monkeypatch
     assert kwargs["messages"][0]["role"] == "system"
     assert "你是 SuFen" in kwargs["messages"][0]["content"]
     assert "资料优先" in kwargs["messages"][0]["content"]
+    assert "禁止串线" in kwargs["messages"][0]["content"]
+    assert "个人业务档案.md" in kwargs["messages"][0]["content"]
 
 
 def test_sufen_system_prompt_skips_inherited_soul_and_subscription(monkeypatch):
