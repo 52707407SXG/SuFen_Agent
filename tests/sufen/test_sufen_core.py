@@ -666,7 +666,9 @@ def test_production_chat_uses_real_provider_not_fake(monkeypatch):
     assert "你是 SuFen" in captured["payload"]["messages"][0]["content"]
     assert "scoped memory" in captured["payload"]["messages"][0]["content"]
     exposed = {item["function"]["name"] for item in captured["payload"]["tools"]}
-    assert exposed == set(SUFEN_TOOL_NAMES)
+    assert exposed == {provider.provider_tool_name(name) for name in SUFEN_TOOL_NAMES}
+    assert all("." not in name for name in exposed)
+    assert "mystand_archive_read" in captured["payload"]["messages"][0]["content"]
     assert any(item.tool == "provider.chat_completions" for item in response.toolAudit)
 
 
@@ -680,6 +682,8 @@ def test_provider_tool_call_loop_executes_whitelist_tool(monkeypatch):
     import sufen.provider as provider
 
     calls = []
+    archive_tool = provider.provider_tool_name("mystand.archive.read")
+    kg_tool = provider.provider_tool_name("mystand.knowledge_graph.read")
 
     def fake_post(_url, _headers, payload):
         calls.append(payload)
@@ -723,6 +727,76 @@ def test_provider_tool_call_loop_executes_whitelist_tool(monkeypatch):
     assert any(item.tool == "provider.chat_completions" for item in response.toolAudit)
 
 
+def test_provider_normalizes_model_evidence_shape(monkeypatch):
+    clear_delegation_nonce_cache()
+    monkeypatch.setenv("SUFEN_PROVIDER_API_KEY", "provider-key")
+    monkeypatch.setenv("SUFEN_DELEGATION_HMAC_SECRET", DELEGATION_SECRET)
+    monkeypatch.setenv("SUFEN_BASE_URL", "https://provider.test/v1")
+    monkeypatch.setenv("SUFEN_TAVILY_API_KEY", "sufen-tavily")
+
+    import sufen.provider as provider
+
+    def fake_post(_url, _headers, _payload):
+        content = {
+            "answer": "normalized evidence answer",
+            "evidenceUsed": [{"authorizationId": "AUTH-P-1", "keyPoint": "客户预算和区域明确"}],
+            "missingAuthorizationRequests": [],
+            "eventDrafts": [],
+            "fieldPatchDrafts": [],
+            "memoryPatch": None,
+            "toolAudit": [],
+        }
+        return {"choices": [{"message": {"content": json.dumps(content, ensure_ascii=False)}}]}
+
+    monkeypatch.setattr(provider, "_post_chat_completions", fake_post)
+    delegation = _signed_delegation_token(nonce="nonce-normalize-evidence")
+    task = SuFenTaskPackage.model_validate(_property_task(delegationToken=delegation.model_dump()))
+    response = answer_sufen("AUTH-P-1", task=task, settings=load_settings())
+
+    assert response.answer == "normalized evidence answer"
+    assert response.evidenceUsed[0].source == "AUTH-P-1"
+    assert response.evidenceUsed[0].summary == "客户预算和区域明确"
+
+
+def test_provider_normalizes_draft_and_audit_shapes(monkeypatch):
+    clear_delegation_nonce_cache()
+    monkeypatch.setenv("SUFEN_PROVIDER_API_KEY", "provider-key")
+    monkeypatch.setenv("SUFEN_DELEGATION_HMAC_SECRET", DELEGATION_SECRET)
+    monkeypatch.setenv("SUFEN_BASE_URL", "https://provider.test/v1")
+    monkeypatch.setenv("SUFEN_TAVILY_API_KEY", "sufen-tavily")
+
+    import sufen.provider as provider
+
+    def fake_post(_url, _headers, _payload):
+        content = {
+            "answer": "normalized draft answer",
+            "evidenceUsed": [],
+            "missingAuthorizationRequests": [],
+            "eventDrafts": [{"title": "约客户看房", "description": "明天上午确认金融城房源"}],
+            "fieldPatchDrafts": [{"field": "维护要点", "after": "先确认预算弹性和看房节奏。"}],
+            "memoryPatch": {"scope": "company-ZYJ/operators/1001/subjects/property/P-1", "businessFacts": ["客户关注金融城"]},
+            "toolAudit": [{"tool": "mystand_archive_read", "summary": "读取客户字段"}],
+        }
+        return {"choices": [{"message": {"content": json.dumps(content, ensure_ascii=False)}}]}
+
+    monkeypatch.setattr(provider, "_post_chat_completions", fake_post)
+    delegation = _signed_delegation_token(nonce="nonce-normalize-drafts")
+    task = SuFenTaskPackage.model_validate(_property_task(delegationToken=delegation.model_dump()))
+    response = answer_sufen("AUTH-P-1", task=task, settings=load_settings())
+
+    assert response.eventDrafts[0].name == "约客户看房"
+    assert response.eventDrafts[0].body == "明天上午确认金融城房源"
+    assert response.fieldPatchDrafts[0].field == "维护要点"
+    assert response.fieldPatchDrafts[0].diff.startswith("-")
+    assert "+先确认预算弹性和看房节奏。" in response.fieldPatchDrafts[0].diff
+    assert response.memoryPatch is not None
+    assert response.memoryPatch.scope == {}
+    assert response.memoryPatch.businessFacts == ["客户关注金融城"]
+    assert response.toolAudit[0].tool == "mystand.archive.read"
+    assert response.toolAudit[0].action == "provider_report"
+    assert response.toolAudit[0].status == "读取客户字段"
+
+
 def test_provider_tool_call_uses_task_bound_memory_archive_and_kg(monkeypatch):
     clear_delegation_nonce_cache()
     monkeypatch.setenv("SUFEN_PROVIDER_API_KEY", "provider-key")
@@ -733,6 +807,8 @@ def test_provider_tool_call_uses_task_bound_memory_archive_and_kg(monkeypatch):
     import sufen.provider as provider
 
     calls = []
+    archive_tool = provider.provider_tool_name("mystand.archive.read")
+    kg_tool = provider.provider_tool_name("mystand.knowledge_graph.read")
 
     def fake_post(_url, _headers, payload):
         calls.append(payload)
@@ -755,7 +831,7 @@ def test_provider_tool_call_uses_task_bound_memory_archive_and_kg(monkeypatch):
                                 "id": "call-archive",
                                 "type": "function",
                                 "function": {
-                                    "name": "mystand.archive.read",
+                                    "name": archive_tool,
                                     "arguments": json.dumps({"authorizationId": "AUTH-P-1"}),
                                 },
                             },
@@ -763,7 +839,7 @@ def test_provider_tool_call_uses_task_bound_memory_archive_and_kg(monkeypatch):
                                 "id": "call-kg",
                                 "type": "function",
                                 "function": {
-                                    "name": "mystand.knowledge_graph.read",
+                                    "name": kg_tool,
                                     "arguments": json.dumps({"knowledgeGraphRef": "KGREF-property-maintenance"}),
                                 },
                             },
@@ -776,8 +852,8 @@ def test_provider_tool_call_uses_task_bound_memory_archive_and_kg(monkeypatch):
         assert "/operators/1001/subjects/property/P-1/memory.json" in tool_messages["sufen_memory_search"]["path"]
         assert "/operators/1002/" not in tool_messages["sufen_memory_search"]["path"]
         assert "P-OTHER" not in tool_messages["sufen_memory_search"]["path"]
-        assert tool_messages["mystand.archive.read"]["archive"]["baseInfo"]["title"] == "阳光花园三居"
-        assert tool_messages["mystand.knowledge_graph.read"]["graph"]["name"] == "房源维护知识图谱"
+        assert tool_messages["mystand_archive_read"]["archive"]["baseInfo"]["title"] == "阳光花园三居"
+        assert tool_messages["mystand_knowledge_graph_read"]["graph"]["name"] == "房源维护知识图谱"
         content = {
             "answer": "task-bound tools ok",
             "evidenceUsed": [],

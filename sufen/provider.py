@@ -25,6 +25,17 @@ class ProviderError(RuntimeError):
     """Raised when the production provider cannot return a SuFen response."""
 
 
+def provider_tool_name(internal_name: str) -> str:
+    """Return an OpenAI-compatible tool name while keeping SuFen internals stable."""
+    return re.sub(r"[^a-zA-Z0-9_-]", "_", internal_name)
+
+
+PROVIDER_TOOL_NAME_BY_INTERNAL = {name: provider_tool_name(name) for name in SUFEN_TOOL_NAMES}
+if len(set(PROVIDER_TOOL_NAME_BY_INTERNAL.values())) != len(PROVIDER_TOOL_NAME_BY_INTERNAL):
+    raise RuntimeError("SuFen provider tool name mapping is not one-to-one")
+INTERNAL_TOOL_NAME_BY_PROVIDER = {safe: internal for internal, safe in PROVIDER_TOOL_NAME_BY_INTERNAL.items()}
+
+
 def _chat_completions_url(settings: SuFenSettings) -> str:
     base = settings.base_url.strip().rstrip("/")
     provider = settings.provider.lower().strip()
@@ -58,13 +69,179 @@ def _extract_json_object(text: str) -> dict[str, Any]:
     return payload
 
 
+def _first_present_text(item: dict[str, Any], keys: tuple[str, ...]) -> str:
+    for key in keys:
+        value = item.get(key)
+        if value not in (None, ""):
+            return str(value)
+    return ""
+
+
+def _normalize_evidence_item(item: Any, index: int) -> dict[str, Any]:
+    if not isinstance(item, dict):
+        return {
+            "source": f"provider.evidence.{index}",
+            "summary": str(item),
+            "confidence": 0.5,
+        }
+    source = _first_present_text(item, (
+        "source",
+        "authorizationId",
+        "referenceId",
+        "refId",
+        "id",
+        "title",
+        "name",
+    )) or f"provider.evidence.{index}"
+    summary = _first_present_text(item, (
+        "summary",
+        "keyPoint",
+        "keypoint",
+        "point",
+        "reason",
+        "detail",
+        "content",
+        "text",
+    ))
+    if not summary:
+        summary = json.dumps(item, ensure_ascii=False, sort_keys=True)[:800]
+    try:
+        confidence = float(item.get("confidence", 0.5))
+    except (TypeError, ValueError):
+        confidence = 0.5
+    return {
+        "source": source[:200],
+        "summary": summary[:1200],
+        "confidence": max(0.0, min(1.0, confidence)),
+    }
+
+
+def _normalize_tool_audit_item(item: Any, index: int) -> dict[str, Any]:
+    if not isinstance(item, dict):
+        return {
+            "tool": f"provider.audit.{index}",
+            "action": "provider_report",
+            "status": str(item)[:800] or "ok",
+            "draftOnly": True,
+        }
+    provider_name = _first_present_text(item, ("tool", "name", "function", "id")) or f"provider.audit.{index}"
+    tool = INTERNAL_TOOL_NAME_BY_PROVIDER.get(provider_name, provider_name)
+    action = _first_present_text(item, ("action", "operation", "op", "type")) or "provider_report"
+    status = _first_present_text(item, ("status", "result", "summary", "note", "reason", "message")) or "ok"
+    return {
+        "tool": tool[:160],
+        "action": action[:160],
+        "status": status[:1200],
+        "draftOnly": bool(item.get("draftOnly", True)),
+    }
+
+
+def _normalize_field_patch_draft(item: Any, index: int) -> dict[str, Any]:
+    if not isinstance(item, dict):
+        text = str(item)
+        return {
+            "target": {},
+            "field": f"fieldPatch.{index}",
+            "before": None,
+            "after": text,
+            "diff": f"+{text}"[:1200],
+            "reason": "provider_field_patch_draft",
+            "draftOnly": True,
+        }
+    clean = dict(item)
+    field = _first_present_text(clean, ("field", "name", "key", "path")) or f"fieldPatch.{index}"
+    before = clean.get("before")
+    after = clean.get("after", clean.get("value", clean.get("suggestion")))
+    diff = _first_present_text(clean, ("diff", "patch", "change"))
+    if not diff:
+        before_text = "" if before is None else str(before)
+        after_text = "" if after is None else str(after)
+        diff = "\n".join([f"-{before_text}", f"+{after_text}"]).strip()
+    if not diff:
+        diff = json.dumps(clean, ensure_ascii=False, sort_keys=True)[:1200]
+    target = clean.get("target") if isinstance(clean.get("target"), dict) else {}
+    return {
+        "target": target,
+        "field": field[:160],
+        "before": before,
+        "after": after,
+        "diff": diff[:2000],
+        "reason": _first_present_text(clean, ("reason", "summary", "note", "message")) or "provider_field_patch_draft",
+        "draftOnly": bool(clean.get("draftOnly", True)),
+    }
+
+
+def _normalize_event_draft(item: Any, index: int) -> dict[str, Any]:
+    if not isinstance(item, dict):
+        text = str(item)
+        return {
+            "name": f"SuFen事件草稿{index + 1}",
+            "body": text,
+            "priority": "normal",
+            "target": {},
+            "reason": "provider_event_draft",
+            "draftOnly": True,
+        }
+    clean = dict(item)
+    return {
+        "name": _first_present_text(clean, ("name", "title", "summary")) or f"SuFen事件草稿{index + 1}",
+        "body": _first_present_text(clean, ("body", "content", "description", "detail", "message")) or _first_present_text(clean, ("name", "title", "summary")) or "SuFen事件草稿",
+        "eventTime": clean.get("eventTime"),
+        "remindTime": clean.get("remindTime"),
+        "repeatType": clean.get("repeatType"),
+        "priority": clean.get("priority") if clean.get("priority") in {"low", "normal", "high"} else "normal",
+        "target": clean.get("target") if isinstance(clean.get("target"), dict) else {},
+        "reason": _first_present_text(clean, ("reason", "summary", "note")) or "provider_event_draft",
+        "draftOnly": bool(clean.get("draftOnly", True)),
+    }
+
+
+def _normalize_provider_response_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    clean = dict(payload)
+    if isinstance(clean.get("evidenceUsed"), list):
+        clean["evidenceUsed"] = [
+            _normalize_evidence_item(item, index)
+            for index, item in enumerate(clean["evidenceUsed"])
+        ]
+    if isinstance(clean.get("toolAudit"), list):
+        clean["toolAudit"] = [
+            _normalize_tool_audit_item(item, index)
+            for index, item in enumerate(clean["toolAudit"])
+        ]
+    if isinstance(clean.get("fieldPatchDrafts"), list):
+        clean["fieldPatchDrafts"] = [
+            _normalize_field_patch_draft(item, index)
+            for index, item in enumerate(clean["fieldPatchDrafts"])
+        ]
+    if isinstance(clean.get("eventDrafts"), list):
+        clean["eventDrafts"] = [
+            _normalize_event_draft(item, index)
+            for index, item in enumerate(clean["eventDrafts"])
+        ]
+    if isinstance(clean.get("memoryPatch"), dict):
+        memory_patch = dict(clean["memoryPatch"])
+        if not isinstance(memory_patch.get("scope"), dict):
+            memory_patch["scope"] = {}
+        clean["memoryPatch"] = memory_patch
+    return clean
+
+
 def _tool_definitions() -> list[dict[str, Any]]:
     os.environ.setdefault("SUFEN_AGENT_MODE", "1")
     import tools.sufen_mystand_tools  # noqa: F401
     import tools.web_tools  # noqa: F401
     from tools.registry import registry
 
-    return registry.get_definitions(set(SUFEN_TOOL_NAMES), quiet=True)
+    definitions = registry.get_definitions(set(SUFEN_TOOL_NAMES), quiet=True)
+    safe_definitions: list[dict[str, Any]] = []
+    for definition in definitions:
+        safe_definition = dict(definition)
+        function = dict(safe_definition.get("function") or {})
+        internal_name = str(function.get("name") or "").strip()
+        function["name"] = PROVIDER_TOOL_NAME_BY_INTERNAL.get(internal_name, provider_tool_name(internal_name))
+        safe_definition["function"] = function
+        safe_definitions.append(safe_definition)
+    return safe_definitions
 
 
 def _system_message(task: SuFenTaskPackage) -> str:
@@ -92,6 +269,8 @@ def _system_message(task: SuFenTaskPackage) -> str:
         + json.dumps(output_contract, ensure_ascii=False, separators=(",", ":")),
         "本轮只允许使用 SuFen 第一版工具白名单："
         + json.dumps(SUFEN_TOOL_NAMES, ensure_ascii=False),
+        "实际 provider 工具 schema 为兼容 OpenAI/DeepSeek，工具名中的点号会映射为下划线；模型必须使用当前 schema 暴露的工具名："
+        + json.dumps(PROVIDER_TOOL_NAME_BY_INTERNAL, ensure_ascii=False, sort_keys=True),
         "scoped memory 只能使用 My Stand taskPackage 锁定的范围，模型不得自选 memoryRoot，不得切换 admin 路径："
         + json.dumps(scope, ensure_ascii=False, sort_keys=True),
         "所有事件、字段修改、记忆修改都只能作为 draft 返回，不能直接写正式数据。",
@@ -150,7 +329,7 @@ def _message_from_provider(data: dict[str, Any]) -> dict[str, Any]:
 def _provider_message_to_sufen(message: dict[str, Any]) -> SuFenResponse:
     content = message.get("content") or ""
     try:
-        response = SuFenResponse.model_validate(_extract_json_object(content))
+        response = SuFenResponse.model_validate(_normalize_provider_response_payload(_extract_json_object(content)))
     except (ValidationError, json.JSONDecodeError) as exc:
         raise ProviderError(f"provider response failed SuFenResponse validation: {exc}") from exc
     response.toolAudit.append(
@@ -181,9 +360,10 @@ def _tool_call_id(tool_call: dict[str, Any], index: int) -> str:
     return str(tool_call.get("id") or f"call_{index}")
 
 
-def _tool_call_name_and_args(tool_call: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+def _tool_call_name_and_args(tool_call: dict[str, Any]) -> tuple[str, dict[str, Any], str]:
     function = tool_call.get("function") or {}
-    name = str(function.get("name") or "").strip()
+    provider_name = str(function.get("name") or "").strip()
+    name = INTERNAL_TOOL_NAME_BY_PROVIDER.get(provider_name, provider_name)
     raw_args = function.get("arguments") or "{}"
     if isinstance(raw_args, dict):
         args = raw_args
@@ -191,10 +371,10 @@ def _tool_call_name_and_args(tool_call: dict[str, Any]) -> tuple[str, dict[str, 
         try:
             args = json.loads(raw_args)
         except json.JSONDecodeError as exc:
-            raise ProviderError(f"tool call {name or '<missing>'} arguments were not JSON") from exc
+            raise ProviderError(f"tool call {provider_name or '<missing>'} arguments were not JSON") from exc
     if not isinstance(args, dict):
-        raise ProviderError(f"tool call {name or '<missing>'} arguments must be an object")
-    return name, args
+        raise ProviderError(f"tool call {provider_name or '<missing>'} arguments must be an object")
+    return name, args, provider_name
 
 
 def _task_scope(task: SuFenTaskPackage) -> dict[str, str]:
@@ -246,9 +426,9 @@ def _dispatch_tool_call(
     index: int,
     task: SuFenTaskPackage,
 ) -> tuple[dict[str, Any], ToolAuditItem]:
-    name, args = _tool_call_name_and_args(tool_call)
+    name, args, provider_name = _tool_call_name_and_args(tool_call)
     if name not in SUFEN_TOOL_NAMES:
-        raise ProviderError(f"unauthorized tool call: {name or '<missing>'}")
+        raise ProviderError(f"unauthorized tool call: {provider_name or '<missing>'}")
 
     from tools.registry import registry
 
@@ -260,7 +440,7 @@ def _dispatch_tool_call(
     tool_message = {
         "role": "tool",
         "tool_call_id": _tool_call_id(tool_call, index),
-        "name": name,
+        "name": provider_name or PROVIDER_TOOL_NAME_BY_INTERNAL.get(name, name),
         "content": _serialize_tool_result(result),
     }
     audit = ToolAuditItem(tool=name, action="provider_tool_call", status="ok")
