@@ -162,7 +162,6 @@ infographic/
 /Dockerfile
 /docker/
 /docker-compose*.yml
-/sufen
 /setup-sufen.sh
 /sufen-already-has-routines.md
 /cli-config.yaml.example

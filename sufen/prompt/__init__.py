@@ -1,0 +1,1 @@
+"""SuFen prompt package."""
