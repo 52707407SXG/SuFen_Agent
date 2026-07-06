@@ -87,6 +87,9 @@ dependencies = [
   "websockets==15.0.1",
   # .gitignore-aware file matching for delivery-boundary checks.
   "pathspec==1.1.1",
+  # Required so uv-created project environments can run the documented
+  # fresh-clone command: `uv run --python 3.11 python -m pip install -e ".[all]"`.
+  "pip==26.0.1",
   "fastapi>=0.104.0,<1",
   "uvicorn[standard]>=0.24.0,<1",
   # FastAPI UploadFile/Form support for future My Stand API payloads.
