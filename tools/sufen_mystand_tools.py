@@ -57,8 +57,6 @@ def _memory_search(args: dict[str, Any], **_: Any) -> dict[str, Any]:
             operator_user_id=args["operatorUserId"],
             subject_type=args["subjectType"],
             subject_id=args["subjectId"],
-            root=args.get("memoryRoot"),
-            admin=bool(args.get("admin", False)),
         )
     except KeyError as exc:
         return fail_closed(f"missing_memory_scope_{exc.args[0]}")
@@ -176,9 +174,7 @@ registry.register(
         "subjectType": {"type": "string"},
         "subjectId": {"type": "string"},
         "query": {"type": "string"},
-        "memoryRoot": {"type": "string"},
-        "admin": {"type": "boolean"},
-    }, ["operatorUserId", "subjectType", "subjectId"]),
+    }, ["companyId", "operatorUserId", "subjectType", "subjectId"]),
     handler=_memory_search,
     emoji="🧠",
 )

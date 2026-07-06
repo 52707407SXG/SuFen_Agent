@@ -137,6 +137,29 @@ def test_tool_whitelist_and_draft_tools():
     assert "+可谈" in diff["fieldPatchDraft"]["diff"]
 
 
+def test_sufen_memory_search_scope_rejects_model_selected_root_and_admin(monkeypatch):
+    monkeypatch.setenv("SUFEN_AGENT_MODE", "1")
+    monkeypatch.setenv("SUFEN_MEMORY_ROOT", "/var/lib/sufen-agent/memory")
+
+    schema = registry.get_schema("sufen_memory_search")
+    properties = schema["parameters"]["properties"]
+    assert "memoryRoot" not in properties
+    assert "admin" not in properties
+
+    result = registry.dispatch("sufen_memory_search", {
+        "companyId": "company-ZYJ",
+        "operatorUserId": "1001",
+        "subjectType": "property",
+        "subjectId": "P-1",
+        "query": "底价",
+        "memoryRoot": "/tmp/model-selected-root",
+        "admin": True,
+    })
+    assert "/tmp/model-selected-root" not in result["path"]
+    assert "/admin/" not in result["path"]
+    assert "/operators/1001/subjects/property/P-1/memory.json" in result["path"]
+
+
 def test_sufen_web_tools_use_sufen_tavily_key(monkeypatch):
     monkeypatch.setenv("SUFEN_AGENT_MODE", "1")
     monkeypatch.setenv("SUFEN_TAVILY_API_KEY", "sufen-tavily")
