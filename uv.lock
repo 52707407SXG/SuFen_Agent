@@ -1185,6 +1185,7 @@ web = [
 dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
+    { name = "setuptools" },
 ]
 
 [package.metadata]
@@ -1239,6 +1240,7 @@ provides-extras = ["dev", "web", "all"]
 dev = [
     { name = "pytest", specifier = "==9.0.2" },
     { name = "pytest-asyncio", specifier = "==1.3.0" },
+    { name = "setuptools", specifier = "==81.0.0" },
 ]
 
 [[package]]
