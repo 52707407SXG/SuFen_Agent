@@ -7,13 +7,13 @@ Verification source: GitHub fresh clone, not the original local candidate tree.
 Runtime validation commit:
 
 ```text
-2e49b7447e517b04e6b0fa97243f9a13042a182a
+9ae83b35cb05fb750de3109980cd0f7eb5ba1030
 ```
 
 Fresh clone directory:
 
 ```text
-/tmp/sufen-agent-fresh-next
+/tmp/sufen-agent-fresh-fourth
 ```
 
 Note: this machine uses a temporary `uv` runtime under `/tmp/sufen-uv-venv` for verification. All project checks below were run from the GitHub fresh clone with `uv run --python 3.11`.
@@ -21,16 +21,16 @@ Note: this machine uses a temporary `uv` runtime under `/tmp/sufen-uv-venv` for 
 ## Fresh Clone Setup
 
 ```bash
-rm -rf /tmp/sufen-agent-fresh-next /tmp/sufen-wheel-check-next
-git clone git@github.com:52707407SXG/SuFen_Agent.git /tmp/sufen-agent-fresh-next
-cd /tmp/sufen-agent-fresh-next
+rm -rf /tmp/sufen-agent-fresh-fourth /tmp/sufen-wheel-check-fourth
+git clone git@github.com:52707407SXG/SuFen_Agent.git /tmp/sufen-agent-fresh-fourth
+cd /tmp/sufen-agent-fresh-fourth
 git rev-parse HEAD
 ```
 
 Result:
 
 ```text
-HEAD = 2e49b7447e517b04e6b0fa97243f9a13042a182a
+HEAD = 9ae83b35cb05fb750de3109980cd0f7eb5ba1030
 ```
 
 ## Required Commands
@@ -53,7 +53,7 @@ uv run --python 3.11 pytest tests/sufen -q
 Result:
 
 ```text
-40 passed in 1.11s
+46 passed in 1.63s
 ```
 
 ```bash
@@ -74,12 +74,12 @@ uv run --python 3.11 python -c "import sufen; print(sufen.__file__)"
 Result:
 
 ```text
-/private/tmp/sufen-agent-fresh-next/sufen/__init__.py
+/private/tmp/sufen-agent-fresh-fourth/sufen/__init__.py
 passed
 ```
 
 ```bash
-uv run --python 3.11 python -m pip wheel . --no-deps --no-build-isolation -w /tmp/sufen-wheel-check-next
+uv run --python 3.11 python -m pip wheel . --no-deps --no-build-isolation -w /tmp/sufen-wheel-check-fourth
 ```
 
 Result:
@@ -115,6 +115,11 @@ passed
 - Production mode requires `delegationToken` before the provider is called.
 - Provider tool-calling loop executes whitelist tools and sends tool results back to the provider.
 - Non-whitelist provider tool calls fail closed and are not executed.
+- Provider tool execution is task-bound: `registry.dispatch` receives the current `SuFenTaskPackage`.
+- `sufen_memory_search` ignores model-selected roots/admin flags and rejects cross-operator or cross-subject scope.
+- `mystand.archive.read` reads only the current task package archive context, ignores model-supplied payloads, and rejects non-task authorization refs.
+- `mystand.knowledge_graph.read` reads only task package `knowledgeGraphRefs` and rejects non-task refs.
+- Tool schemas no longer expose `authorizedPayload`, `companyId`, `operatorUserId`, `subjectType`, `subjectId`, `scope`, `memoryRoot`, `admin`, `archiveContext`, `knowledgeGraphRefs`, or `scopedMemoryKey`.
 - `/v1/chat` requires `SUFEN_SERVICE_API_KEY`.
 - Provider requests use `SUFEN_PROVIDER_API_KEY`; service and provider keys can differ.
 - `SUFEN_API_KEY` remains only as a deprecated compatibility fallback.
@@ -124,5 +129,5 @@ passed
 
 ## Remaining Risk
 
-- The runtime validation commit is `2e49b7447e517b04e6b0fa97243f9a13042a182a`. This report may be committed after that validation; report-only commits do not change runtime code.
+- The runtime validation commit is `9ae83b35cb05fb750de3109980cd0f7eb5ba1030`. This report may be committed after that validation; report-only commits do not change runtime code.
 - Provider verification uses local stubs in unit tests instead of a paid external model endpoint, so it proves request path, auth header selection, system policy injection, taskPackage injection, tool loop behavior, and whitelist enforcement without spending external tokens.
