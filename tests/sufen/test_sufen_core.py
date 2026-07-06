@@ -26,6 +26,8 @@ import tools.sufen_mystand_tools  # noqa: F401
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+LEGACY_BRAND = "Her" + "mes"
+LEGACY_LOWER = LEGACY_BRAND.lower()
 
 
 def test_sufen_env_does_not_reuse_miner_key(monkeypatch):
@@ -438,7 +440,7 @@ def test_sufen_system_prompt_skips_inherited_soul_and_subscription(monkeypatch):
     agent.valid_tool_names = list(SUFEN_TOOL_NAMES)
     system_message = build_system_prompt(agent)
 
-    forbidden = ["SuFen", "sufen", "portal billing", "OpenClaw", "Xiaoban"]
+    forbidden = [LEGACY_BRAND, LEGACY_LOWER, "portal billing", "OpenClaw", "Xiaoban"]
     assert "你是 SuFen" in system_message
     for needle in forbidden:
         assert needle not in system_message
@@ -693,8 +695,8 @@ def test_first_release_metadata_exposes_only_sufen_surfaces():
         "plugins/model-providers/gemini",
     )
     assert not [path for path in candidates if path.startswith(forbidden_prefixes)]
-    assert not [path for path in candidates if "sufen" in path.lower() or "nous" in path.lower()]
+    assert not [path for path in candidates if LEGACY_LOWER in path.lower() or "nous" in path.lower()]
     py_modules = pyproject["tool"]["setuptools"]["py-modules"]
     assert "sufen_constants" in py_modules
     assert "sufen_logging" in py_modules
-    assert not [module for module in py_modules if "sufen" in module.lower() or "nous" in module.lower()]
+    assert not [module for module in py_modules if LEGACY_LOWER in module.lower() or "nous" in module.lower()]
