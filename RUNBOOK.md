@@ -1,0 +1,89 @@
+# SuFen-Agent Runbook
+
+## Fresh Clone Setup
+
+```bash
+git clone git@github.com:52707407SXG/SuFen_Agent.git
+cd SuFen_Agent
+
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install -U pip setuptools wheel
+pip install -e ".[all]"
+
+cp .env.example .env
+```
+
+Fill only SuFen-specific values in `.env`:
+
+```bash
+SUFEN_PROVIDER=deepseek
+SUFEN_MODEL=deepseek-v4-pro
+SUFEN_API_KEY=
+SUFEN_BASE_URL=
+SUFEN_TAVILY_API_KEY=
+SUFEN_MEMORY_ROOT=/var/lib/sufen-agent/memory
+SUFEN_BIND_HOST=127.0.0.1
+SUFEN_PORT=8791
+```
+
+## Start
+
+```bash
+sufen --version
+sufen chat -q "AUTH-P-1001 这个业主现在该怎么跟"
+sufen serve
+```
+
+Health:
+
+```bash
+curl http://127.0.0.1:8791/health
+```
+
+Task-package chat smoke:
+
+```bash
+curl -s http://127.0.0.1:8791/v1/chat \
+  -H 'content-type: application/json' \
+  -d '{
+    "query": "AUTH-P-1 KGREF-property-maintenance 这个房源怎么维护",
+    "taskPackage": {
+      "operator": {"userId": "1001", "name": "经纪人A", "role": "broker"},
+      "subject": {"type": "property", "id": "P-1"},
+      "scene": "房源维护",
+      "archiveContext": {
+        "companyId": "company-ZYJ",
+        "baseInfo": {"title": "阳光花园三居", "askingPrice": "480万"},
+        "propertyNote": "业主说先按原价挂一周。",
+        "ownerIntent": "想换房，但对降价犹豫",
+        "fiveDimensionScores": {"priceFlexibility": 2, "urgency": 3},
+        "eventSummary": ["近三天有两组看房但无明确报价"]
+      },
+      "brokerProfile": {"capabilityStage": "新手"},
+      "knowledgeGraphRefs": ["KGREF-property-maintenance"],
+      "scopedMemoryKey": "company-ZYJ/operators/1001/subjects/property/P-1"
+    }
+  }'
+```
+
+## Optional Node Workspace
+
+Node is not required to run SuFen v0.1.0. The root `package.json` is retained only for future asset/tooling work. It declares no dependencies, and the root `package-lock.json` is intentionally minimal.
+
+```bash
+npm install
+```
+
+## Pre-Handoff Checks
+
+```bash
+python scripts/sufen_rebrand_check.py
+python scripts/sufen_secret_scan.py
+pytest tests/sufen
+sufen --version
+sufen chat -q "AUTH-P-1 KGREF-property-maintenance 这个房源怎么维护"
+python -m pip wheel . --no-deps --no-build-isolation -w /tmp/sufen-wheel-check
+```
+
+Do not upload GitHub until the user explicitly approves upload.

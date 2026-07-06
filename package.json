@@ -1,0 +1,23 @@
+{
+  "name": "sufen-agent",
+  "version": "0.1.0",
+  "description": "SuFen-Agent, My Stand archive strategist and scoped-memory analyst.",
+  "private": true,
+  "scripts": {
+    "postinstall": "echo 'SuFen Node workspace ready. Run: sufen --version'",
+    "install:root": "npm install --workspaces=false",
+    "audit:root": "npm audit --workspaces=false"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/52707407SXG/SuFen_Agent.git"
+  },
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/52707407SXG/SuFen_Agent/issues"
+  },
+  "homepage": "https://github.com/52707407SXG/SuFen_Agent#readme",
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

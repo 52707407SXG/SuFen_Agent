@@ -1,0 +1,15 @@
+include README.md
+include LICENSE
+include .env.example
+include UPSTREAM.md
+include DISCOVERY.md
+include RUNBOOK.md
+include AGENTS.md
+include SOURCE_MAP.md
+include TEST_REPORT.md
+recursive-include sufen/policy *.md
+include plugins/web/__init__.py
+recursive-include plugins/web/tavily *.py *.yaml *.yml
+recursive-include plugins/model-providers/deepseek *.py *.yaml *.yml
+global-exclude __pycache__
+global-exclude *.py[cod]

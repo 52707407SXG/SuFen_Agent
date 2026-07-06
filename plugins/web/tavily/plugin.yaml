@@ -1,0 +1,7 @@
+name: web-tavily
+version: 1.0.0
+description: "Tavily web search + content extraction. SuFen reads SUFEN_TAVILY_API_KEY from process env or local .env."
+author: My Stand
+kind: backend
+provides_web_providers:
+  - tavily
