@@ -42,8 +42,8 @@ sufen chat -q "AUTH-P-1001 这个业主现在该怎么跟" --task-package /path/
 sufen serve
 ```
 
-`sufen` without arguments opens the human terminal chat entry with a compact
-`SuFen` wordmark card, model/context line, and `sufen>` prompt. The systemd
+`sufen` without arguments opens the human terminal chat entry with the My
+Stand-style welcome card, `SuFen` model status line, and `❯` prompt. The systemd
 service must continue to use `sufen serve`.
 
 Health:
@@ -79,6 +79,12 @@ task = {
         "ownerIntent": "想换房，但对降价犹豫",
         "fiveDimensionScores": {"priceFlexibility": 2, "urgency": 3},
         "eventSummary": ["近三天有两组看房但无明确报价"],
+        "requiredKnowledgeGraph": {
+            "requiredName": "房源维护",
+            "status": "available",
+            "refId": "KGREF-property-maintenance",
+        },
+        "dialogueLogBrief": "暂无 SuFen 历史日志。",
         "knowledgeGraphs": {
             "KGREF-property-maintenance": {
                 "name": "房源维护知识图谱",
@@ -88,13 +94,18 @@ task = {
     },
     "brokerProfile": {"capabilityStage": "新手"},
     "knowledgeGraphRefs": ["KGREF-property-maintenance"],
-    "scopedMemoryKey": "company-ZYJ/operators/1001/subjects/property/P-1",
+    "dialogueLogKey": "company-ZYJ:1001:property:P-1",
+    "requiredKnowledgeGraph": {
+        "requiredName": "房源维护",
+        "status": "available",
+        "refId": "KGREF-property-maintenance",
+    },
 }
 delegation = AgentDelegationToken.model_validate({
     "actorAgent": "lucan",
     "operatorUserId": "1001",
     "subject": task["subject"],
-    "allowedActions": ["analyze", "suggest", "eventDraft", "fieldPatchDraft", "memoryPatch"],
+    "allowedActions": ["analyze", "suggest", "eventDraft", "fieldPatchDraft"],
     "expiresAt": (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat(),
     "nonce": "sufen-smoke-" + uuid.uuid4().hex,
     "signature": "pending",

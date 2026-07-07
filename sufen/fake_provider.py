@@ -50,7 +50,7 @@ def answer_with_fake_provider(prompt: str, task: SuFenTaskPackage | None = None)
         answer=(
             "我已按 SuFen 的资料优先规则进入分析模式。"
             f"{subject_label}第一版本地 dry-run 不连接生产库；拿到授权档案、知识图谱和经纪人特征卡后，"
-            "我会输出策略建议、事件草稿、字段 diff 草稿和 memoryPatch。"
+            "我会输出策略建议、事件草稿和字段 diff 草稿；memoryPatch 保持为空。"
         ),
         evidenceUsed=evidence,
         toolAudit=tool_audit,

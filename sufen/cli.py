@@ -16,11 +16,15 @@ from sufen.output import AuthorizationRequest, SuFenResponse, ToolAuditItem
 from sufen.provider import ProviderError
 from sufen.task_package import SuFenTaskPackage
 from sufen.terminal_ui import (
+    terminal_fallback_response,
+    make_terminal_prompt_session,
     print_startup_card,
     print_terminal_intro,
     print_terminal_response,
     terminal_local_response,
-    terminal_prompt,
+    terminal_provider_response,
+    terminal_runtime_activity,
+    trim_terminal_history,
 )
 
 
@@ -62,12 +66,17 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         settings = load_settings()
         print_startup_card(settings)
         print_terminal_intro(settings)
+        prompt_session = make_terminal_prompt_session(settings)
+        terminal_history: list[dict[str, str]] = []
         while True:
             try:
-                query = input(terminal_prompt()).strip()
+                query = prompt_session.prompt().strip()
             except (EOFError, KeyboardInterrupt):
                 print()
                 return 0
+            except UnicodeDecodeError:
+                print("输入编码被终端截断了，这一条我没接住；请重新发一遍。")
+                continue
             if not query:
                 continue
             if query in {"/quit", "/exit"}:
@@ -83,9 +92,23 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             local_response = terminal_local_response(query, settings) if task is None and not args.fake else None
             if local_response is not None:
                 print_terminal_response(local_response)
+            elif task is None and not args.fake:
+                try:
+                    with terminal_runtime_activity(settings):
+                        response = terminal_provider_response(query, settings, terminal_history)
+                except ProviderError as exc:
+                    response = terminal_fallback_response(query, settings, str(exc))
+                else:
+                    terminal_history.extend([
+                        {"role": "user", "content": query},
+                        {"role": "assistant", "content": response.answer},
+                    ])
+                    terminal_history = trim_terminal_history(terminal_history)
+                print_terminal_response(response)
             else:
                 try:
-                    response = answer_sufen(query, task=task, settings=settings, force_fake=bool(args.fake))
+                    with terminal_runtime_activity(settings):
+                        response = answer_sufen(query, task=task, settings=settings, force_fake=bool(args.fake))
                 except (ProviderError, ValueError) as exc:
                     response = SuFenResponse(
                         answer=FAIL_CLOSED_MESSAGE,

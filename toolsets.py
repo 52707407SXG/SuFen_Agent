@@ -98,7 +98,6 @@ SUFEN_TOOL_NAMES = [
     "web_search",
     "web_extract",
     "sufen_memory_search",
-    "sufen_memory_patch_draft",
     "mystand.event.draft",
     "mystand.field_patch_draft",
 ]
@@ -120,7 +119,7 @@ TOOLSETS = {
     "sufen": {
         "description": (
             "SuFen first-release My Stand tools: authorized archive/knowledge "
-            "reads, parsing, scoped memory search, draft-only event and field "
+            "reads, parsing, read-only human memory search, draft-only event and field "
             "patch output, plus web search/extract."
         ),
         "tools": SUFEN_TOOL_NAMES,

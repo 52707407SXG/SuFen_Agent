@@ -12,8 +12,8 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
-AllowedAction = Literal["analyze", "suggest", "eventDraft", "fieldPatchDraft", "memoryPatch"]
-DeniedAction = Literal["directWrite", "crossUserRead", "externalSend", "rawDbAccess"]
+AllowedAction = Literal["analyze", "suggest", "eventDraft", "fieldPatchDraft"]
+DeniedAction = Literal["directWrite", "crossUserRead", "externalSend", "rawDbAccess", "memoryWrite"]
 
 
 class Operator(BaseModel):
@@ -48,18 +48,20 @@ class SuFenTaskPackage(BaseModel):
     brokerProfile: dict[str, Any] = Field(default_factory=dict)
     knowledgeGraphRefs: list[str] = Field(default_factory=list)
     scopedMemoryKey: str | None = None
+    dialogueLogKey: str | None = None
+    requiredKnowledgeGraph: dict[str, Any] | None = None
     allowedActions: list[AllowedAction] = Field(default_factory=lambda: [
         "analyze",
         "suggest",
         "eventDraft",
         "fieldPatchDraft",
-        "memoryPatch",
     ])
     deniedActions: list[DeniedAction] = Field(default_factory=lambda: [
         "directWrite",
         "crossUserRead",
         "externalSend",
         "rawDbAccess",
+        "memoryWrite",
     ])
     delegationToken: AgentDelegationToken | None = None
 
@@ -174,7 +176,7 @@ def ensure_safe_actions(
     consume_nonce: bool = True,
     require_delegation_token: bool = False,
 ) -> None:
-    forbidden = {"directWrite", "crossUserRead", "externalSend", "rawDbAccess"}
+    forbidden = {"directWrite", "crossUserRead", "externalSend", "rawDbAccess", "memoryWrite"}
     if not forbidden.issubset(set(task.deniedActions)):
         missing = sorted(forbidden.difference(task.deniedActions))
         raise ValueError(f"task package is missing deniedActions: {', '.join(missing)}")

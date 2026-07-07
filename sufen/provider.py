@@ -12,7 +12,7 @@ from pydantic import ValidationError
 
 from sufen.auth import FAIL_CLOSED_MESSAGE, extract_authorization_refs
 from sufen.config import SuFenSettings, load_settings
-from sufen.output import AuthorizationRequest, EvidenceItem, MemoryPatch, SuFenResponse, ToolAuditItem
+from sufen.output import AuthorizationRequest, EvidenceItem, SuFenResponse, ToolAuditItem
 from sufen.prompt.identity import build_sufen_identity_block
 from sufen.task_package import SuFenTaskPackage, ensure_safe_actions
 from sufen.time import now as sufen_now
@@ -276,16 +276,7 @@ def _normalize_provider_response_payload(payload: dict[str, Any]) -> dict[str, A
             _normalize_event_draft(item, index)
             for index, item in enumerate(clean["eventDrafts"])
         ]
-    if isinstance(clean.get("memoryPatch"), dict):
-        memory_patch = dict(clean["memoryPatch"])
-        if not isinstance(memory_patch.get("scope"), dict):
-            memory_patch["scope"] = {}
-        for key in ("businessFacts", "strategyObservations", "brokerAdaptation", "openQuestions", "sourceRefs"):
-            memory_patch[key] = _normalize_memory_list(memory_patch.get(key))
-        for key in ("lastSummary", "memoryIndexText"):
-            if memory_patch.get(key) not in (None, ""):
-                memory_patch[key] = str(memory_patch.get(key)).strip()
-        clean["memoryPatch"] = memory_patch
+    clean["memoryPatch"] = None
     return clean
 
 
@@ -384,17 +375,37 @@ def _runtime_anchor_card(task: SuFenTaskPackage) -> str:
         "scene": task.scene,
         "operator": operator,
         "subject": subject,
+        "sufenMode": archive_context.get("sufenMode") or archive_context.get("reasoningMode") or "normal",
+        "strategyModeDirective": archive_context.get("strategyModeDirective"),
         "subjectRelationHint": archive_context.get("subjectRelationHint"),
         "module": archive_context.get("module") or archive_context.get("moduleName"),
+        "dialogueLogKey": task.dialogueLogKey,
+        "requiredKnowledgeGraph": task.requiredKnowledgeGraph or archive_context.get("requiredKnowledgeGraph"),
+        "knowledgeGraphBinding": archive_context.get("knowledgeGraphBinding"),
         "contextLoadPlanVersion": (archive_context.get("contextLoadPlan") or {}).get("version")
         if isinstance(archive_context.get("contextLoadPlan"), dict)
         else None,
     }
+    strategy_mode = str(anchor["sufenMode"] or "").strip().lower() == "strategy"
+    strategy_text = (
+        "用户已显式开启谋略模式：本轮必须更重视人情关系、真实意图、时机、风险、后手和长期影响；"
+        "先听后说，资料不足时只问一个最关键问题；资料足够时给有取舍的判断、话术和下一步。"
+        "谋略模式不是话痨模式，不得为了显得深而堆长篇，不得暴露推理链，不得越权加载未授权资料。"
+        if strategy_mode
+        else ""
+    )
     return (
         "本轮 SuFen 执行锚点：回答前先识别操作者、当前模块、当前档案对象、操作者与档案对象关系、"
         "北京时间和真实意图；目标不清时轻轻确认，目标清楚时直接判断；按需读取最小充分资料，"
         "不得默认全量扫描、不得默认读取结算卡/财务明细/点没点结算、不得把未 loaded 资料当成已读；"
-        "闲聊可以自然聊，但要有边界，不做话痨，也不压迫用户进入业务。\n"
+        "SuFen 只能只读检索单一人工 memory 根目录，不能写 memory，不能输出 memoryPatch；"
+        "历史对话只能按 dialogueLogKey 和 taskPackage.archiveContext.dialogueLogBrief 做摘要续接；"
+        "个人业务档案默认先做管理判断，不做财务表播报；未触发财务明细层不得引用合同号、确认、结算或凭证字段；"
+        "manager_confirmed/店长确认不是经纪人本人确认；"
+        "必须检查 requiredKnowledgeGraph/knowledgeGraphBinding，不能把房源维护、客户跟进、售后维护、经纪人成长路径四类图谱混用；"
+        "闲聊可以自然聊，但要有边界，不做话痨，也不压迫用户进入业务。"
+        + (f"\n{strategy_text}" if strategy_text else "")
+        + "\n"
         + json.dumps(anchor, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     )
 
@@ -406,7 +417,8 @@ def _system_message(task: SuFenTaskPackage) -> str:
         "subjectType": task.subject.type,
         "subjectId": task.subject.id,
         "scene": task.scene,
-        "scopedMemoryKey": task.scopedMemoryKey,
+        "dialogueLogKey": task.dialogueLogKey,
+        "requiredKnowledgeGraph": task.requiredKnowledgeGraph or task.archiveContext.get("requiredKnowledgeGraph"),
     }
     output_contract = {
         "answer": "string",
@@ -426,13 +438,14 @@ def _system_message(task: SuFenTaskPackage) -> str:
         + json.dumps(SUFEN_TOOL_NAMES, ensure_ascii=False),
         "实际 provider 工具 schema 为兼容 OpenAI/DeepSeek，工具名中的点号会映射为下划线；模型必须使用当前 schema 暴露的工具名："
         + json.dumps(PROVIDER_TOOL_NAME_BY_INTERNAL, ensure_ascii=False, sort_keys=True),
-        "scoped memory 只能使用 My Stand taskPackage 锁定的范围，模型不得自选 memoryRoot，不得切换 admin 路径："
+        "SuFen 的长期 memory 是单一人工维护根目录，只能通过 sufen_memory_search 只读检索；模型不得自选 memoryRoot，不得创建 scoped memory，不得输出 memoryPatch："
         + json.dumps(scope, ensure_ascii=False, sort_keys=True),
         _runtime_anchor_card(task),
         "My Stand taskPackage.archiveContext.archive、archiveContext.broker、archiveContext.archiveRows、archiveSummary、parserToolResults、referenceContext 和 systemFoundationContext 是后端已按权限注入的当前可读资料；只要这些字段里已有当前档案资料，必须直接读取并据此回答，不得因为用户没有额外粘贴 AUTH/OUT/KGREF 就说当前档案缺资料。",
         "必须遵守 taskPackage.archiveContext.contextLoadPlan：先用 loaded 层轻量回应或确认意图，目标明确后再按触发条件展开特征卡、房源笔记、图片/OCR、知识图谱等未加载层；未标记 loaded 的资料不得假装已读。",
+        "必须遵守 requiredKnowledgeGraph/knowledgeGraphBinding：经纪人个人业务档案只用“经纪人成长路径”，房源维护只用“房源维护”，客户跟进只用“客户跟进”，售后维护只用“售后维护”。图谱缺失、未授权或为空时必须明说低置信度，不能换用别的图谱。",
         _authorized_context_card(task),
-        "所有事件、字段修改、记忆修改都只能作为 draft 返回，不能直接写正式数据。",
+        "所有事件和字段修改都只能作为 draft 返回，不能直接写正式数据；SuFen 不返回记忆修改草稿。",
     ])
 
 
@@ -583,28 +596,11 @@ def _authorized_context_fallback_response(
         "- 本轮只围绕当前 operator + subject 的任务范围回答，不引用其他经纪人或其他档案。\n\n"
         "**下一步**\n"
         "1. 先按表格里的关键事实确认沟通目标。\n"
-        "2. 把本轮真正重要的业务判断沉淀为摘要，寒暄和过程性原文不长期保存。\n"
+        "2. 本轮真正重要的业务判断由 My Stand 写入 SuFen 日志摘要，SuFen 自己不写长期 memory。\n"
         "3. 如果要生成事件、字段修改或外发话术，继续走草稿确认，不直接写正式数据。"
     )
     if prompt:
         answer += f"\n\n**本轮问题**\n\n{prompt.strip()[:1200]}"
-
-    scope = {
-        "companyId": str(archive_context.get("companyId") or "company-ZYJ"),
-        "operatorUserId": task.operator.userId,
-        "subjectType": task.subject.type,
-        "subjectId": task.subject.id,
-        "scene": scene,
-    }
-    source_refs = [
-        str(item)
-        for item in (
-            archive_context.get("authorizationId"),
-            archive_context.get("actualArchiveId"),
-            task.scopedMemoryKey,
-        )
-        if item
-    ]
     return SuFenResponse(
         answer=answer,
         evidenceUsed=[
@@ -615,19 +611,7 @@ def _authorized_context_fallback_response(
             )
         ],
         missingAuthorizationRequests=[],
-        memoryPatch=MemoryPatch(
-            scope=scope,
-            businessFacts=[fact for fact in [facts_text[:1200], f"当前档案标题：{title}"] if fact],
-            strategyObservations=[
-                f"本轮按已授权 taskPackage 读取{scene}资料；模型缺资料话术已被后端兜底拦截。",
-            ],
-            brokerAdaptation=[],
-            openQuestions=[],
-            lastSummary=f"{scene} {title}：{facts_text[:800]}",
-            memoryIndexText=f"{scene} {title} {facts_text[:1200]}",
-            sourceRefs=source_refs,
-            confidence=0.72,
-        ),
+        memoryPatch=None,
         toolAudit=[
             *loop_audit,
             *previous_response.toolAudit,
@@ -698,17 +682,9 @@ def _task_bound_tool_args(name: str, args: dict[str, Any], task: SuFenTaskPackag
     clean = dict(args)
     if name in {"mystand.archive.read", "mystand.knowledge_graph.read"}:
         clean.pop("authorizedPayload", None)
-    if name in {"sufen_memory_search", "sufen_memory_patch_draft"}:
-        scope = _task_scope(task)
-        for key, expected in scope.items():
-            if key in clean and clean.get(key) not in (None, "", expected):
-                raise ProviderError(f"task scope mismatch for {key}")
+    if name == "sufen_memory_search":
+        for key in _task_scope(task):
             clean.pop(key, None)
-        nested = clean.get("scope")
-        if isinstance(nested, dict):
-            for key, expected in scope.items():
-                if key in nested and nested.get(key) not in (None, "", expected):
-                    raise ProviderError(f"task scope mismatch for scope.{key}")
         clean.pop("scope", None)
         clean.pop("memoryRoot", None)
         clean.pop("admin", None)

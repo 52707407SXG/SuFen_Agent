@@ -5,13 +5,30 @@ from __future__ import annotations
 import os
 import shutil
 import sys
+import threading
 import textwrap
+import time
 import unicodedata
 
 from sufen import __version__
 from sufen.auth import extract_authorization_refs
 from sufen.config import SuFenSettings
 from sufen.output import AuthorizationRequest, EvidenceItem, SuFenResponse, ToolAuditItem
+from sufen.provider import (
+    ProviderError,
+    _chat_completions_url,
+    _message_from_provider,
+    _post_chat_completions,
+)
+
+try:
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.formatted_text import FormattedText
+    from prompt_toolkit.styles import Style as PromptStyle
+except Exception:  # pragma: no cover - fallback for stripped installs
+    PromptSession = None  # type: ignore[assignment]
+    FormattedText = None  # type: ignore[assignment]
+    PromptStyle = None  # type: ignore[assignment]
 
 
 GOLD = "\033[1;38;2;199;160;106m"
@@ -20,7 +37,26 @@ RESET = "\033[0m"
 TEXT = "\033[38;2;232;226;214m"
 ACCENT = "\033[1;38;2;225;171;92m"
 
-TAGLINE = "素分 SuFen · My Stand 档案军师"
+SEPARATOR = "  │  "
+STARTUP_CARD_MAX_WIDTH = 142
+STARTUP_CARD_SIDE_MARGIN = 4
+SUFEN_WORDMARK = (
+    "██████  ██   ██  ███████ ███████ ███   ██",
+    "██      ██   ██  ██      ██      ████  ██",
+    "██████  ██   ██  █████   █████   ██ ██ ██",
+    "    ██  ██   ██  ██      ██      ██  ████",
+    "██████  ██████   ██      ███████ ██   ███",
+)
+TERMINAL_SYSTEM_PROMPT = (
+    "你是 SuFen，中文名固定是“素分”，不要写成“苏芬”。你是 My Stand 的档案军师。当前是在服务器裸终端里的普通聊天入口，"
+    "没有 My Stand 后端注入的 taskPackage、正式档案正文、入口指定知识图谱或 SuFen 日志。"
+    "请像正常同事一样用中文自然对话，不要像产品说明书，不要输出 JSON。"
+    "可以聊判断、话术、下一步打法和通用业务策略。"
+    "如果用户给 AUTH、OUT、KGREF、ref_ 或 knowledge: 这类站内资料钥匙，"
+    "只能说明需要从 My Stand 对应页面打开 SuFen 才能读取，不能假装已经读到。"
+    "回答要短一点，先接住用户，再给有用的下一句。"
+)
+SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
 
 def _stdout_is_tty() -> bool:
@@ -29,6 +65,11 @@ def _stdout_is_tty() -> bool:
 
 def _color(text: str, code: str, *, enabled: bool) -> str:
     return f"{code}{text}{RESET}" if enabled else text
+
+
+def clear_terminal_screen() -> None:
+    if _stdout_is_tty() and os.environ.get("SUFEN_NO_CLEAR") != "1":
+        print("\033[2J\033[H", end="")
 
 
 def _terminal_width(default: int = 80) -> int:
@@ -71,126 +112,411 @@ def _clip(text: str, width: int) -> str:
     return "".join(pieces).rstrip() + suffix
 
 
-def _plain_cell(text: str, width: int, *, color: str = TEXT, enabled: bool) -> str:
-    clipped = _clip(text, width)
-    padded = clipped + (" " * max(0, width - _display_width(clipped)))
-    return _color(padded, color, enabled=enabled)
-
-
-def _center_cell(text: str, width: int, *, color: str = TEXT, enabled: bool) -> str:
-    return _color(_center(_clip(text, width), width), color, enabled=enabled)
-
-
 def _rule(width: int) -> str:
     return "─" * max(0, width)
 
 
-def _print_box_line(text: str, body: int, *, color: str, enabled: bool, margin: str) -> None:
-    print(
-        margin
-        + _color("│", GOLD, enabled=enabled)
-        + _plain_cell(text, body, color=color, enabled=enabled)
-        + _color("│", GOLD, enabled=enabled)
+def _cell(text: str, width: int, *, align: str = "left") -> str:
+    clipped = _clip(text, width)
+    if align == "center":
+        return _center(clipped, width)
+    return clipped + (" " * max(0, width - _display_width(clipped)))
+
+
+def _format_cwd(width: int) -> str:
+    cwd = os.getenv("TERMINAL_CWD", os.getcwd())
+    home = os.path.expanduser("~")
+    if cwd == home:
+        cwd = "~"
+    return _clip(cwd, width)
+
+
+def _status_bar_text(settings: SuFenSettings, width: int | None = None) -> str:
+    width = width or _terminal_width()
+    model = settings.model.split("/")[-1]
+    if width < 52:
+        return _clip(f"SuFen {model} · 0s", width)
+    if width < 76:
+        return _clip(f"SuFen {model} · -- · 0s", width)
+    return _clip(f"SuFen {model} │ ctx -- │ [░░░░░░░░░░] -- │ 0s │ ⏲ 0s", width)
+
+
+def _runtime_status_bar_text(settings: SuFenSettings, frame: str, elapsed: float, width: int | None = None) -> str:
+    width = width or _terminal_width()
+    model = settings.model.split("/")[-1]
+    elapsed_label = f"{elapsed:.1f}s"
+    if width < 52:
+        return _clip(f"SuFen {model} · runtime {frame} · {elapsed_label}", width)
+    if width < 76:
+        return _clip(f"SuFen {model} · runtime {frame} · {elapsed_label}", width)
+    return _clip(
+        f"SuFen {model} │ runtime {frame} │ [░░░░░░░░░░] -- │ 0s │ ⏲ {elapsed_label}",
+        width,
     )
 
 
-def _print_box_center(text: str, body: int, *, color: str, enabled: bool, margin: str) -> None:
+def _clear_runtime_line() -> None:
+    sys.stdout.write("\r\033[2K")
+    sys.stdout.flush()
+
+
+def _runtime_line(settings: SuFenSettings, frame: str, elapsed: float, status: str = "runtime") -> str:
+    return _runtime_status_bar_text(settings, frame, elapsed)
+
+
+class TerminalRuntimeActivity:
+    def __init__(self, settings: SuFenSettings, *, status: str = "runtime") -> None:
+        self.settings = settings
+        self.status = status
+        self.enabled = _stdout_is_tty()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._started_at = 0.0
+
+    def __enter__(self) -> "TerminalRuntimeActivity":
+        if not self.enabled:
+            return self
+        self._started_at = time.monotonic()
+        # prompt_toolkit leaves the submitted prompt in scrollback; move the
+        # runtime line onto its own row before repainting it in-place.
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type, _exc, _tb) -> None:
+        if not self.enabled:
+            return None
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=0.5)
+        elapsed = max(0.0, time.monotonic() - self._started_at)
+        symbol = "!" if exc_type else "✓"
+        _clear_runtime_line()
+        print(_color(_runtime_line(self.settings, symbol, elapsed, self.status), TEXT, enabled=True))
+        return None
+
+    def _run(self) -> None:
+        index = 0
+        while not self._stop.wait(0.35):
+            elapsed = max(0.0, time.monotonic() - self._started_at)
+            width = max(20, _terminal_width())
+            line = _runtime_line(self.settings, SPINNER_FRAMES[index % len(SPINNER_FRAMES)], elapsed, self.status)
+            sys.stdout.write("\r\033[2K" + _color(_clip(line, width - 1), TEXT, enabled=True))
+            sys.stdout.flush()
+            index += 1
+
+
+def terminal_runtime_activity(settings: SuFenSettings) -> TerminalRuntimeActivity:
+    return TerminalRuntimeActivity(settings)
+
+
+def _message_content_text(content: object) -> str:
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        pieces: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    pieces.append(text)
+        return "\n".join(piece.strip() for piece in pieces if piece.strip()).strip()
+    return ""
+
+
+def _normalize_sufen_display_name(text: str) -> str:
+    return (text or "").replace("苏芬", "素分").replace("蘇芬", "素分")
+
+
+def _sufen_wordmark_lines(width: int) -> tuple[str, ...]:
+    if max(_display_width(line) for line in SUFEN_WORDMARK) <= width:
+        return SUFEN_WORDMARK
+    return ("SuFen",)
+
+
+def _print_welcome_row(
+    *,
+    left: str,
+    right: str = "",
+    left_width: int,
+    right_width: int,
+    color_enabled: bool,
+    left_color: str = TEXT,
+    right_color: str = TEXT,
+    left_align: str = "center",
+    right_align: str = "left",
+) -> None:
     print(
-        margin
-        + _color("│", GOLD, enabled=enabled)
-        + _center_cell(text, body, color=color, enabled=enabled)
-        + _color("│", GOLD, enabled=enabled)
+        _color("│", GOLD, enabled=color_enabled)
+        + _color(_cell(left, left_width, align=left_align), left_color, enabled=color_enabled)
+        + _color(SEPARATOR, MUTED, enabled=color_enabled)
+        + _color(_cell(right, right_width, align=right_align), right_color, enabled=color_enabled)
+        + _color("│", GOLD, enabled=color_enabled)
     )
 
 
 def print_startup_card(settings: SuFenSettings) -> None:
-    """Print a branded startup card for the human terminal entry."""
+    """Print the My Stand-style startup card for the human terminal entry."""
+    clear_terminal_screen()
     color_enabled = _stdout_is_tty() and os.environ.get("NO_COLOR") != "1"
-    columns = max(56, _terminal_width())
-    frame_width = min(max(64, columns - 2), 96)
-    body = frame_width - 2
-    margin = " " * max(0, (columns - frame_width) // 2)
-
+    columns = max(40, _terminal_width())
+    available_width = max(40, columns - STARTUP_CARD_SIDE_MARGIN)
+    frame_width = min(STARTUP_CARD_MAX_WIDTH, max(64, available_width), max(40, columns - 2))
+    inner_width = frame_width - 2
+    separator_width = _display_width(SEPARATOR)
+    left_width = min(56, max(24, inner_width // 2 - 3))
+    right_width = inner_width - left_width - separator_width
+    if right_width < 16:
+        right_width = max(10, min(16, inner_width - separator_width - 10))
+        left_width = max(10, inner_width - separator_width - right_width)
+    model = settings.model.split("/")[-1]
     title = f"SuFen v{__version__}"
-    top_rule = max(0, body - _display_width(title) - 2)
+    top_rule = max(0, frame_width - _display_width(title) - 5)
+    wordmark_lines = _sufen_wordmark_lines(left_width)
+
     print(
-        margin
-        + _color("╭─ ", GOLD, enabled=color_enabled)
+        _color("╭─ ", GOLD, enabled=color_enabled)
         + _color(title, ACCENT, enabled=color_enabled)
         + _color(" " + ("─" * top_rule) + "╮", GOLD, enabled=color_enabled)
     )
-    _print_box_center("SuFen", body, color=ACCENT, enabled=color_enabled, margin=margin)
-    _print_box_line(TAGLINE, body, color=GOLD, enabled=color_enabled, margin=margin)
-    _print_box_line("终端入口：通用策略讨论 / 站内ID识别 / 本机调试", body, color=TEXT, enabled=color_enabled, margin=margin)
-    _print_box_line("正式档案：从 My Stand 档案页打开，由后端注入授权资料", body, color=TEXT, enabled=color_enabled, margin=margin)
-    print(margin + _color("├" + ("─" * body) + "┤", GOLD, enabled=color_enabled))
-    _print_box_line(f"模型：{settings.model} · provider：{settings.provider}", body, color=ACCENT, enabled=color_enabled, margin=margin)
-    _print_box_line("上下文：terminal · 未注入 taskPackage · 不读生产档案", body, color=MUTED, enabled=color_enabled, margin=margin)
-    print(margin + _color("╰" + ("─" * body) + "╯", GOLD, enabled=color_enabled))
+    _print_welcome_row(
+        left="Welcome back!",
+        right="Tips for getting started",
+        left_width=left_width,
+        right_width=right_width,
+        color_enabled=color_enabled,
+        right_color=ACCENT,
+    )
+    _print_welcome_row(
+        left="My Stand SuFen Agent",
+        right="Run /help to see SuFen commands",
+        left_width=left_width,
+        right_width=right_width,
+        color_enabled=color_enabled,
+    )
+    _print_welcome_row(
+        left="",
+        right="Run /new to start a clean session",
+        left_width=left_width,
+        right_width=right_width,
+        color_enabled=color_enabled,
+    )
+    for index, logo_line in enumerate(wordmark_lines):
+        right = ""
+        right_color = TEXT
+        if index == 0:
+            right = _rule(min(64, right_width))
+            right_color = MUTED
+        elif index == 1:
+            right = "Recent activity"
+            right_color = ACCENT
+        elif index == 2:
+            right = "No recent activity"
+            right_color = MUTED
+        _print_welcome_row(
+            left=logo_line,
+            right=right,
+            left_width=left_width,
+            right_width=right_width,
+            color_enabled=color_enabled,
+            left_color=ACCENT,
+            right_color=right_color,
+        )
+    if len(wordmark_lines) < 2:
+        _print_welcome_row(
+            left="",
+            right="Recent activity",
+            left_width=left_width,
+            right_width=right_width,
+            color_enabled=color_enabled,
+            right_color=ACCENT,
+        )
+        _print_welcome_row(
+            left="",
+            right="No recent activity",
+            left_width=left_width,
+            right_width=right_width,
+            color_enabled=color_enabled,
+            right_color=MUTED,
+        )
+    _print_welcome_row(
+        left="",
+        right="",
+        left_width=left_width,
+        right_width=right_width,
+        color_enabled=color_enabled,
+    )
+    _print_welcome_row(
+        left=f"{model} · API Usage Billing",
+        right="",
+        left_width=left_width,
+        right_width=right_width,
+        color_enabled=color_enabled,
+    )
+    _print_welcome_row(
+        left=_format_cwd(left_width),
+        right="",
+        left_width=left_width,
+        right_width=right_width,
+        color_enabled=color_enabled,
+        left_color=MUTED,
+    )
+    print(_color("╰" + ("─" * inner_width) + "╯", GOLD, enabled=color_enabled))
     print()
 
 
 def print_terminal_intro(settings: SuFenSettings) -> None:
     color_enabled = _stdout_is_tty() and os.environ.get("NO_COLOR") != "1"
-    columns = max(64, _terminal_width())
-    status_width = min(max(64, columns - 2), 96)
-    margin = " " * max(0, (columns - status_width) // 2)
-    model = settings.model.split("/")[-1]
-    print("素分本机入口已就绪。输入 /help 查看命令，/new 新会话，/quit 退出。")
-    print("提示：终端入口不读取生产档案；从 My Stand 档案页打开才会带入授权资料。")
-    status = (
-        _color("SuFen", GOLD, enabled=color_enabled)
-        + _color(" │ ", GOLD, enabled=color_enabled)
-        + _color("terminal", TEXT, enabled=color_enabled)
-        + _color(" │ ", GOLD, enabled=color_enabled)
-        + _color(model, TEXT, enabled=color_enabled)
-        + _color(" │ ", GOLD, enabled=color_enabled)
-        + _color("context: none", MUTED, enabled=color_enabled)
-    )
-    print(margin + status)
+    columns = max(60, _terminal_width())
+    status_width = min(columns - 1, 150)
+    print("Welcome to SuFen! Type your message or /help for commands.")
+    print(_color("✦ Tip: 从 My Stand 档案页打开 SuFen，才能带入正式授权资料。", MUTED, enabled=color_enabled))
+    print()
+    print(_color(_status_bar_text(settings, status_width), TEXT, enabled=color_enabled))
+    print(_color(_rule(status_width), MUTED, enabled=color_enabled))
 
 
 def terminal_prompt() -> str:
-    return "sufen> "
+    return "❯ "
+
+
+def _can_use_prompt_toolkit() -> bool:
+    if PromptSession is None or PromptStyle is None or FormattedText is None:
+        return False
+    if not _stdout_is_tty():
+        return False
+    fileno = getattr(sys.stdin, "fileno", None)
+    if fileno is None:
+        return False
+    try:
+        fileno()
+    except Exception:
+        return False
+    return True
+
+
+def _disable_prompt_toolkit_cpr_warning(session: object) -> None:
+    try:
+        session.app.renderer.cpr_not_supported_callback = None
+    except Exception:
+        pass
+
+
+class TerminalPromptSession:
+    def __init__(self, settings: SuFenSettings) -> None:
+        self.settings = settings
+        self._session = None
+        if _can_use_prompt_toolkit():
+            style = PromptStyle.from_dict({
+                "prompt": "#ffffff bold",
+                "bottom-toolbar": "bg:#1d1f21 #e8e2d6",
+            })
+            self._session = PromptSession(
+                message=FormattedText([("class:prompt", terminal_prompt())]),
+                bottom_toolbar=self._bottom_toolbar,
+                refresh_interval=0.5,
+                style=style,
+            )
+            _disable_prompt_toolkit_cpr_warning(self._session)
+
+    def prompt(self) -> str:
+        if self._session is None:
+            # Fallback only: real TTY Chinese input uses prompt_toolkit to avoid CPR/Unicode terminal issues.
+            return input(terminal_prompt())
+        return self._session.prompt()
+
+    def _bottom_toolbar(self):
+        return FormattedText([("class:bottom-toolbar", " " + _status_bar_text(self.settings))])
+
+
+def make_terminal_prompt_session(settings: SuFenSettings) -> TerminalPromptSession:
+    return TerminalPromptSession(settings)
 
 
 def _compact_query(text: str) -> str:
     return "".join(ch for ch in (text or "").lower() if not ch.isspace())
 
 
+def trim_terminal_history(history: list[dict[str, str]], *, max_messages: int = 12, max_chars: int = 6000) -> list[dict[str, str]]:
+    """Keep bare-terminal chat history short enough for a CLI session."""
+    kept = list(history[-max_messages:])
+    while kept and sum(len(item.get("content", "")) for item in kept) > max_chars:
+        kept.pop(0)
+    return kept
+
+
+def terminal_provider_response(
+    prompt: str,
+    settings: SuFenSettings,
+    history: list[dict[str, str]] | None = None,
+) -> SuFenResponse:
+    """Answer a bare-terminal prompt through the real provider without task tools."""
+    if not settings.provider_api_key.strip():
+        raise ProviderError("missing_sufen_provider_api_key")
+    headers = {
+        "Authorization": f"Bearer {settings.provider_api_key}",
+        "Content-Type": "application/json",
+    }
+    messages = [
+        {"role": "system", "content": TERMINAL_SYSTEM_PROMPT},
+        *trim_terminal_history(history or []),
+        {"role": "user", "content": prompt},
+    ]
+    payload = {
+        "model": settings.model,
+        "messages": messages,
+        "temperature": 0.5,
+        "max_tokens": 700,
+    }
+    data = _post_chat_completions(_chat_completions_url(settings), headers, payload)
+    message = _message_from_provider(data)
+    answer = _message_content_text(message.get("content"))
+    if not answer:
+        raise ProviderError("provider terminal response was empty")
+    answer = _normalize_sufen_display_name(answer)
+    return SuFenResponse(
+        answer=answer,
+        toolAudit=[
+            ToolAuditItem(
+                tool="provider.chat_completions",
+                action="terminal_chat",
+                status=f"ok:{settings.provider}:{settings.model}",
+            )
+        ],
+    )
+
+
+def terminal_fallback_response(prompt: str, settings: SuFenSettings, reason: str) -> SuFenResponse:
+    """Natural local fallback when the terminal provider is unavailable."""
+    business_words = ("业主", "客户", "房源", "客源", "售后", "经纪人", "谈", "维护", "降价", "带看", "报价")
+    if any(word in prompt for word in business_words):
+        answer = (
+            "可以，先按你现在给的信息拆。\n\n"
+            "我会先看：对方明确说了什么、真正卡住他的点是什么、下一步能不能做成一个低压力动作。"
+            "你把具体情况发我，我先按通用经验帮你捋。"
+        )
+    else:
+        answer = (
+            "我在。你直接说事就行。\n\n"
+            "现在真实模型没接上，我先用本机兜底回你；要聊具体档案，还是从 My Stand 页面打开 SuFen 更准。"
+        )
+    return SuFenResponse(
+        answer=answer,
+        toolAudit=[
+            ToolAuditItem(tool="sufen.terminal", action="local_fallback", status=reason[:500])
+        ],
+    )
+
+
 def terminal_local_response(prompt: str, settings: SuFenSettings) -> SuFenResponse | None:
-    """Handle terminal-only prompts that should not hit the strict HTTP contract."""
+    """Handle terminal-only prompts that must not hit the provider."""
     query = (prompt or "").strip()
-    compact = _compact_query(query)
     if not query:
         return None
 
     refs = extract_authorization_refs(query)
-    identity_hits = (
-        "你好",
-        "你是谁",
-        "介绍",
-        "能做什么",
-        "help",
-        "帮助",
-        "怎么用",
-        "素分",
-        "sufen",
-    )
-    if any(hit in compact for hit in identity_hits):
-        return SuFenResponse(
-            answer=(
-                "我是 SuFen，My Stand 的档案军师。\n\n"
-                "- 我适合陪你拆业主、客户、经纪人和售后档案。\n"
-                "- 在 My Stand 页面里打开我时，我会拿到后端注入的授权档案、知识图谱和 scoped memory。\n"
-                "- 只在终端裸聊时，我不会越权读生产档案；你可以问通用策略，也可以粘贴站内ID让我识别资料缺口。\n\n"
-                f"当前模型：{settings.model} · provider：{settings.provider}。"
-            ),
-            toolAudit=[
-                ToolAuditItem(tool="sufen.terminal", action="local_identity", status="ok")
-            ],
-        )
-
     if refs:
         evidence = [
             EvidenceItem(
@@ -202,12 +528,10 @@ def terminal_local_response(prompt: str, settings: SuFenSettings) -> SuFenRespon
         ]
         return SuFenResponse(
             answer=(
-                "我识别到你给了资料钥匙，但终端裸入口没有 My Stand 后端注入的 taskPackage，"
-                "所以我不能直接读正式档案正文。\n\n"
-                "正确用法有两个：\n"
-                "1. 从 My Stand 对应档案页面打开 SuFen，让后端把当前账号可读资料注入给我。\n"
-                "2. 开发验收时用 `sufen chat --task-package <json>` 传入受控任务包。\n\n"
-                "我可以先做通用策略讨论，但不会把没有读到的档案当成事实。"
+                "这个站内 ID 我认出来了，但现在是在裸终端里，后端没有把对应档案正文和权限包带过来，"
+                "所以我不能直接当成已经读到资料。\n\n"
+                "你要我真看这份档案，就从 My Stand 对应页面打开 SuFen；"
+                "如果只是先讨论打法，可以直接把你知道的情况发我，我按你给的信息帮你拆。"
             ),
             evidenceUsed=evidence,
             missingAuthorizationRequests=[
@@ -221,31 +545,7 @@ def terminal_local_response(prompt: str, settings: SuFenSettings) -> SuFenRespon
                 ToolAuditItem(tool="sufen.terminal", action="recognize_authorization_refs", status="taskPackage_missing")
             ],
         )
-
-    business_words = ("业主", "客户", "房源", "客源", "售后", "经纪人", "谈", "维护", "降价", "带看", "报价")
-    if any(word in query for word in business_words):
-        return SuFenResponse(
-            answer=(
-                "可以先按通用策略拆，但我先说边界：终端裸聊没有当前档案正文，"
-                "所以以下只能当低置信度框架，不能当作对某个真实业主/客户的定论。\n\n"
-                "建议先拆三件事：\n"
-                "1. 事实：对方明确说过什么，哪些只是我们猜的。\n"
-                "2. 动机：他真正怕的是价格、时间、面子、家庭意见，还是信息不够。\n"
-                "3. 下一步：只给一个低阻力动作，比如补一组对比、约一次复盘、确认一个底线。\n\n"
-                "如果要做真档案判断，请从 My Stand 档案页打开 SuFen。"
-            ),
-            toolAudit=[
-                ToolAuditItem(tool="sufen.terminal", action="generic_strategy_without_task", status="low_confidence")
-            ],
-        )
-
-    return SuFenResponse(
-        answer=(
-            "我在。终端入口适合做 SuFen 本机调试、通用策略讨论和资料钥匙识别；"
-            "真实档案分析要从 My Stand 页面进入，那里会带上账号权限、档案正文、知识图谱和记忆范围。"
-        ),
-        toolAudit=[ToolAuditItem(tool="sufen.terminal", action="local_chat", status="ok")],
-    )
+    return None
 
 
 def print_terminal_response(response: SuFenResponse) -> None:

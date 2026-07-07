@@ -11,7 +11,7 @@ import json
 from typing import Any
 
 from sufen.auth import extract_authorization_refs, fail_closed, refs_to_dicts
-from sufen.memory import draft_memory_patch, load_memory, memory_path
+from sufen.memory import search_human_memory
 from sufen.task_package import SuFenTaskPackage
 from tools.registry import registry
 
@@ -120,44 +120,11 @@ def _memory_search(args: dict[str, Any], *, task_package: SuFenTaskPackage | Non
     task = _require_task(task_package)
     if isinstance(task, dict):
         return task
-    scope = _task_scope(task)
-    mismatch = _scope_mismatch(args, scope)
-    if mismatch:
-        return fail_closed(f"memory_scope_mismatch_{mismatch}")
-    try:
-        path = memory_path(
-            company_id=scope["companyId"],
-            operator_user_id=scope["operatorUserId"],
-            subject_type=scope["subjectType"],
-            subject_id=scope["subjectId"],
-        )
-    except KeyError as exc:
-        return fail_closed(f"missing_memory_scope_{exc.args[0]}")
-    memory = load_memory(path)
-    query = (args.get("query") or "").lower()
-    haystack = " ".join([
-        memory.get("memoryIndexText") or "",
-        " ".join(memory.get("businessFacts") or []),
-        " ".join(memory.get("strategyObservations") or []),
-        " ".join(memory.get("openQuestions") or []),
-    ]).lower()
     return _ok({
-        "path": str(path),
-        "memory": memory,
-        "matched": bool(query and query in haystack),
+        "memory": search_human_memory(args.get("query") or "", limit=8),
+        "scopeIgnored": _task_scope(task),
+        "writeAllowed": False,
     })
-
-
-def _memory_patch_draft(args: dict[str, Any], *, task_package: SuFenTaskPackage | None = None, **_: Any) -> dict[str, Any]:
-    task = _require_task(task_package)
-    if isinstance(task, dict):
-        return task
-    scope = _task_scope(task)
-    mismatch = _scope_mismatch(args, scope)
-    if mismatch:
-        return fail_closed(f"memory_scope_mismatch_{mismatch}")
-    patch = args.get("patch") or {}
-    return _ok({"memoryPatch": draft_memory_patch(scope, patch)})
 
 
 def _event_draft(args: dict[str, Any], **_: Any) -> dict[str, Any]:
@@ -245,20 +212,11 @@ registry.register(
 registry.register(
     name="sufen_memory_search",
     toolset="sufen",
-    schema=_schema("sufen_memory_search", "Search scoped SuFen memory for the current taskPackage operator and subject.", {
+    schema=_schema("sufen_memory_search", "Search the single human-maintained SuFen memory root. Read-only; never scoped by broker or subject.", {
         "query": {"type": "string"},
     }),
     handler=_memory_search,
     emoji="🧠",
-)
-registry.register(
-    name="sufen_memory_patch_draft",
-    toolset="sufen",
-    schema=_schema("sufen_memory_patch_draft", "Create a scoped memory patch draft. Does not write memory.", {
-        "patch": {"type": "object"},
-    }, ["patch"]),
-    handler=_memory_patch_draft,
-    emoji="📝",
 )
 registry.register(
     name="mystand.event.draft",

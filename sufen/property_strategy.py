@@ -11,7 +11,6 @@ from sufen.output import (
     EventDraft,
     EvidenceItem,
     FieldPatchDraft,
-    MemoryPatch,
     SuFenResponse,
     ToolAuditItem,
 )
@@ -72,22 +71,9 @@ def _broker_adaptation(task: SuFenTaskPackage) -> str:
     return "按当前经纪人特征卡处理：建议保持可执行、可复盘、可确认。"
 
 
-def _scope(task: SuFenTaskPackage) -> dict[str, Any]:
-    archive = task.archiveContext or {}
-    return {
-        "companyId": _pick(archive, "companyId", default="company-ZYJ"),
-        "operatorUserId": task.operator.userId,
-        "subjectType": task.subject.type,
-        "subjectId": task.subject.id,
-        "scene": task.scene,
-    }
-
-
 def _source_refs(refs: Iterable[AuthorizationRef], task: SuFenTaskPackage) -> list[str]:
     out = [ref.raw for ref in refs]
     out.extend(task.knowledgeGraphRefs)
-    if task.scopedMemoryKey:
-        out.append(task.scopedMemoryKey)
     return list(dict.fromkeys(item for item in out if item))
 
 
@@ -179,7 +165,7 @@ def build_property_archive_response(
         f"五维评分参考：{scores_text}。下一步先用一次结构化回访补齐未知项，再决定是否推降价、换卖点或加强带看反馈。"
     )
     answer = (
-        f"基于已注入的房源档案、经纪人特征卡、知识图谱引用和 scoped memory，SuFen 的初步判断是："
+        f"基于已注入的房源档案、经纪人特征卡、入口指定知识图谱和只读人工 memory，SuFen 的初步判断是："
         f"这套房源当前要先验证业主真实意图和价格弹性，不能只按一句话做字面跟进。{broker_adaptation}"
         f"关键依据：{events_text}。建议先做一次回访确认，再把确认结果交给 My Stand 前端审查后写入。"
     )
@@ -213,34 +199,6 @@ def build_property_archive_response(
             )
         )
 
-    memory_patch: MemoryPatch | None = None
-    if "memoryPatch" in task.allowedActions:
-        memory_patch = MemoryPatch(
-            scope=_scope(task),
-            businessFacts=[
-                fact
-                for fact in [
-                    f"档案 {task.subject.type}/{task.subject.id} 已进入 {task.scene} 场景。",
-                    f"价格信号：{price_signal}" if price_signal else "",
-                    f"业主信号：{owner_signal}" if owner_signal else "",
-                ]
-                if fact
-            ],
-            strategyObservations=[
-                "本轮判断重点是验证业主真实意图、价格弹性和近期反馈之间是否矛盾。",
-                f"五维评分参考：{scores_text}",
-            ],
-            brokerAdaptation=[broker_adaptation],
-            openQuestions=[
-                "业主当前真实底价和可接受成交周期是什么？",
-                "最近一次看房/询价反馈是否支持当前挂牌策略？",
-            ],
-            lastSummary="首版业主房源档案 SuFen dry-run 已生成策略、事件草稿、字段 diff 草稿和 memoryPatch。",
-            memoryIndexText=f"{task.scene} {title} {owner_signal} {price_signal} {broker_adaptation}",
-            sourceRefs=source_refs,
-            confidence=confidence,
-        )
-
     evidence = [
         EvidenceItem(source="task.archiveContext", summary="已读取 My Stand 注入的授权房源档案上下文。", confidence=confidence),
         EvidenceItem(source="task.brokerProfile", summary=f"已读取经纪人特征卡：{broker_adaptation}", confidence=confidence),
@@ -255,32 +213,24 @@ def build_property_archive_response(
         EvidenceItem(source=kg_ref, summary="已作为房源维护知识图谱引用纳入本轮判断。", confidence=confidence)
         for kg_ref in task.knowledgeGraphRefs
     )
-    if task.scopedMemoryKey:
-        evidence.append(
-            EvidenceItem(source=task.scopedMemoryKey, summary="已按 scoped memory key 绑定当前经纪人与当前档案。", confidence=confidence)
-        )
-
     audit = list(initial_audit)
     audit.extend(
         [
             ToolAuditItem(tool="mystand.archive.read", action="consume_task_archiveContext", status="ok" if archive else "missing"),
             ToolAuditItem(tool="mystand.knowledge_graph.read", action="consume_knowledgeGraphRefs", status="ok" if task.knowledgeGraphRefs else "missing"),
-            ToolAuditItem(tool="sufen_memory_search", action="bind_scoped_memory", status="ok" if task.scopedMemoryKey else "missing"),
+            ToolAuditItem(tool="sufen_memory_search", action="read_human_memory_root", status="available_read_only"),
         ]
     )
     if event_drafts:
         audit.append(ToolAuditItem(tool="mystand.event.draft", action="create_draft", status="ok"))
     if field_patch_drafts:
         audit.append(ToolAuditItem(tool="mystand.field_patch_draft", action="create_diff_draft", status="ok"))
-    if memory_patch is not None:
-        audit.append(ToolAuditItem(tool="sufen_memory_patch_draft", action="create_memory_patch_draft", status="ok"))
-
     return SuFenResponse(
         answer=answer,
         evidenceUsed=evidence,
         missingAuthorizationRequests=missing_requests,
         eventDrafts=event_drafts,
         fieldPatchDrafts=field_patch_drafts,
-        memoryPatch=memory_patch,
+        memoryPatch=None,
         toolAudit=audit,
     )
