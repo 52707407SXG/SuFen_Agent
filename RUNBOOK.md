@@ -42,9 +42,9 @@ sufen chat -q "AUTH-P-1001 这个业主现在该怎么跟" --task-package /path/
 sufen serve
 ```
 
-`sufen` without arguments opens the human terminal chat entry with the startup
-card, model line, and `sufen>` prompt. The systemd service must continue to use
-`sufen serve`.
+`sufen` without arguments opens the human terminal chat entry with a compact
+`SuFen` wordmark card, model/context line, and `sufen>` prompt. The systemd
+service must continue to use `sufen serve`.
 
 Health:
 

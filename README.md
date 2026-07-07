@@ -24,7 +24,7 @@ sufen serve
 ```
 
 直接输入 `sufen` 会进入本机对话入口；生产服务仍使用 `sufen serve`。
-本机对话入口会显示 SuFen 启动卡、当前模型和 `sufen>` 提示符；HTTP/API 响应合同仍是 JSON。
+本机对话入口会显示紧凑的 `SuFen` 字标启动卡、当前模型/上下文和 `sufen>` 提示符；HTTP/API 响应合同仍是 JSON。
 
 健康检查：
 

@@ -1745,11 +1745,20 @@ def test_sufen_without_args_enters_local_chat(monkeypatch, capsys):
     assert sufen_cli.main([]) == 0
     output = capsys.readouterr().out
     assert "SuFen v" in output
-    assert "deepseek-v4-pro · API Usage Billing" in output
+    assert "素分 SuFen · My Stand 档案军师" in output
+    assert "SuFen │ terminal │ deepseek-v4-pro │ context: none" in output
+    assert "Recent activity" not in output
+    assert "Welcome back!" not in output
     assert "我是 SuFen，My Stand 的档案军师" in output
     assert "AUTH-P-1" in output
     assert "裸终端入口需要 My Stand 后端注入 taskPackage" in output
     assert "missingAuthorizationRequests" not in output
+
+
+def test_sufen_terminal_prompt_names_entry():
+    from sufen.terminal_ui import terminal_prompt
+
+    assert terminal_prompt() == "sufen> "
 
 
 def test_sufen_chat_unsafe_task_package_fails_closed(tmp_path):

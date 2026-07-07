@@ -6,7 +6,7 @@ import os
 import shutil
 import sys
 import textwrap
-import time
+import unicodedata
 
 from sufen import __version__
 from sufen.auth import extract_authorization_refs
@@ -15,43 +15,12 @@ from sufen.output import AuthorizationRequest, EvidenceItem, SuFenResponse, Tool
 
 
 GOLD = "\033[1;38;2;199;160;106m"
-PALE = "\033[38;2;244;231;193m"
 MUTED = "\033[2m"
 RESET = "\033[0m"
 TEXT = "\033[38;2;232;226;214m"
 ACCENT = "\033[1;38;2;225;171;92m"
 
-PIXEL_COLORS = {
-    "A": "\033[38;2;239;232;216m",
-    "G": "\033[38;2;205;144;65m",
-    "Y": "\033[38;2;235;198;118m",
-    "D": "\033[38;2;58;54;62m",
-}
-
-PIXEL_GLYPHS = {
-    "A": "█",
-    "G": "▓",
-    "Y": "▒",
-    "D": "░",
-}
-
-LOGO_PIXELS = [
-    "       AAAAAAA  AAAAAAA       ",
-    "      AA       AA             ",
-    "      AA       AA             ",
-    "      AAAAAA   AAAAA          ",
-    "          AA   AA             ",
-    "          AA   AA             ",
-    "      AAAAAA   AA             ",
-    "                               ",
-    "         GGGGGGGGGGGG          ",
-    "      GGGYYYYYYYYYYGGG         ",
-    "     GGYYDDDDDDDDDDYYGG        ",
-    "      GGGYYYYYYYYYYGGG         ",
-    "         GGGGGGGGGGGG          ",
-]
-
-TAGLINE = "My Stand SuFen Agent"
+TAGLINE = "素分 SuFen · My Stand 档案军师"
 
 
 def _stdout_is_tty() -> bool:
@@ -66,24 +35,45 @@ def _terminal_width(default: int = 80) -> int:
     return shutil.get_terminal_size((default, 24)).columns
 
 
+def _char_width(char: str) -> int:
+    if unicodedata.combining(char):
+        return 0
+    return 2 if unicodedata.east_asian_width(char) in {"F", "W"} else 1
+
+
+def _display_width(text: str) -> int:
+    return sum(_char_width(char) for char in text)
+
+
 def _center(text: str, width: int) -> str:
-    if len(text) >= width:
+    text_width = _display_width(text)
+    if text_width >= width:
         return text
-    left = max(0, (width - len(text)) // 2)
-    return f"{' ' * left}{text}{' ' * (width - len(text) - left)}"
+    left = max(0, (width - text_width) // 2)
+    return f"{' ' * left}{text}{' ' * (width - text_width - left)}"
 
 
 def _clip(text: str, width: int) -> str:
     if width <= 0:
         return ""
-    if len(text) <= width:
+    if _display_width(text) <= width:
         return text
-    return text[: max(0, width - 1)] + "…"
+    suffix = "…"
+    target = max(0, width - _display_width(suffix))
+    pieces: list[str] = []
+    used = 0
+    for char in text:
+        char_width = _char_width(char)
+        if used + char_width > target:
+            break
+        pieces.append(char)
+        used += char_width
+    return "".join(pieces).rstrip() + suffix
 
 
 def _plain_cell(text: str, width: int, *, color: str = TEXT, enabled: bool) -> str:
     clipped = _clip(text, width)
-    padded = clipped + (" " * max(0, width - len(clipped)))
+    padded = clipped + (" " * max(0, width - _display_width(clipped)))
     return _color(padded, color, enabled=enabled)
 
 
@@ -91,131 +81,77 @@ def _center_cell(text: str, width: int, *, color: str = TEXT, enabled: bool) -> 
     return _color(_center(_clip(text, width), width), color, enabled=enabled)
 
 
-def _pixel_line(pattern: str, width: int, *, enabled: bool) -> str:
-    pattern = pattern.rstrip()
-    left = max(0, (width - len(pattern)) // 2)
-    right = max(0, width - len(pattern) - left)
-    pieces = [" " * left]
-    for char in pattern:
-        if char == " ":
-            pieces.append(" ")
-            continue
-        glyph = PIXEL_GLYPHS.get(char, char)
-        color = PIXEL_COLORS.get(char, TEXT)
-        pieces.append(_color(glyph, color, enabled=enabled))
-    pieces.append(" " * right)
-    return "".join(pieces)
-
-
 def _rule(width: int) -> str:
     return "─" * max(0, width)
 
 
-def _animate_startup(*, enabled: bool) -> None:
-    if not enabled or os.environ.get("SUFEN_NO_ANIMATION") == "1":
-        return
-    for frame in ("░░", "▒▒", "▓▓", "██"):
-        sys.stdout.write(f"\r{GOLD}{frame}{RESET} waking SuFen")
-        sys.stdout.flush()
-        time.sleep(0.045)
-    sys.stdout.write("\r" + " " * 22 + "\r")
-    sys.stdout.flush()
+def _print_box_line(text: str, body: int, *, color: str, enabled: bool, margin: str) -> None:
+    print(
+        margin
+        + _color("│", GOLD, enabled=enabled)
+        + _plain_cell(text, body, color=color, enabled=enabled)
+        + _color("│", GOLD, enabled=enabled)
+    )
+
+
+def _print_box_center(text: str, body: int, *, color: str, enabled: bool, margin: str) -> None:
+    print(
+        margin
+        + _color("│", GOLD, enabled=enabled)
+        + _center_cell(text, body, color=color, enabled=enabled)
+        + _color("│", GOLD, enabled=enabled)
+    )
 
 
 def print_startup_card(settings: SuFenSettings) -> None:
     """Print a branded startup card for the human terminal entry."""
     color_enabled = _stdout_is_tty() and os.environ.get("NO_COLOR") != "1"
-    _animate_startup(enabled=color_enabled)
+    columns = max(56, _terminal_width())
+    frame_width = min(max(64, columns - 2), 96)
+    body = frame_width - 2
+    margin = " " * max(0, (columns - frame_width) // 2)
 
-    columns = max(64, _terminal_width())
-    model_line = f"{settings.model} · API Usage Billing"
-    cwd = os.getcwd()
-
-    if columns >= 96:
-        frame_width = min(columns, max(104, columns - 2))
-        left_width = 42
-        right_width = max(32, frame_width - left_width - 3)
-        title = f"SuFen v{__version__}"
-        top_rule = max(0, frame_width - len(title) - 5)
-        print(
-            _color("╭─ ", GOLD, enabled=color_enabled)
-            + _color(title, ACCENT, enabled=color_enabled)
-            + _color(" " + ("─" * top_rule) + "╮", GOLD, enabled=color_enabled)
-        )
-        left_rows = [
-            _center_cell("Welcome back!", left_width, color=TEXT, enabled=color_enabled),
-            _center_cell(TAGLINE, left_width, color=GOLD, enabled=color_enabled),
-            _plain_cell("", left_width, enabled=color_enabled),
-            *[_pixel_line(line, left_width, enabled=color_enabled) for line in LOGO_PIXELS],
-            _plain_cell("", left_width, enabled=color_enabled),
-            _center_cell(model_line, left_width, color=ACCENT, enabled=color_enabled),
-            _center_cell(_clip(cwd, left_width), left_width, color=MUTED, enabled=color_enabled),
-        ]
-        right_rows = [
-            _plain_cell("  Tips for getting started", right_width, color=ACCENT, enabled=color_enabled),
-            _plain_cell("  Run /help to see SuFen commands", right_width, enabled=color_enabled),
-            _plain_cell("  Run /new to start a clean session", right_width, enabled=color_enabled),
-            _plain_cell("  " + _rule(min(64, max(12, right_width - 4))), right_width, color=GOLD, enabled=color_enabled),
-            _plain_cell("  Recent activity", right_width, color=ACCENT, enabled=color_enabled),
-            _plain_cell("  No recent activity", right_width, color=MUTED, enabled=color_enabled),
-        ]
-        total_rows = max(len(left_rows), len(right_rows))
-        for index in range(total_rows):
-            left = left_rows[index] if index < len(left_rows) else _plain_cell("", left_width, enabled=color_enabled)
-            right = right_rows[index] if index < len(right_rows) else _plain_cell("", right_width, enabled=color_enabled)
-            print(
-                _color("│", GOLD, enabled=color_enabled)
-                + left
-                + _color("│", GOLD, enabled=color_enabled)
-                + right
-                + _color("│", GOLD, enabled=color_enabled)
-            )
-        print(_color("╰" + ("─" * (frame_width - 2)) + "╯", GOLD, enabled=color_enabled))
-    else:
-        inner = min(max(62, columns - 2), columns)
-        body = inner - 2
-        print(_color("╭─ " + _clip(f"SuFen v{__version__}", max(1, body - 4)) + " " + ("─" * max(0, body - len(f"SuFen v{__version__}") - 3)) + "╮", GOLD, enabled=color_enabled))
-        print(_color("│", GOLD, enabled=color_enabled) + _center_cell("Welcome back!", body, color=TEXT, enabled=color_enabled) + _color("│", GOLD, enabled=color_enabled))
-        print(_color("│", GOLD, enabled=color_enabled) + _center_cell(TAGLINE, body, color=GOLD, enabled=color_enabled) + _color("│", GOLD, enabled=color_enabled))
-        for line in LOGO_PIXELS:
-            print(_color("│", GOLD, enabled=color_enabled) + _pixel_line(line, body, enabled=color_enabled) + _color("│", GOLD, enabled=color_enabled))
-        print(_color("├" + ("─" * body) + "┤", GOLD, enabled=color_enabled))
-        print(_color("│", GOLD, enabled=color_enabled) + _center_cell(model_line, body, color=ACCENT, enabled=color_enabled) + _color("│", GOLD, enabled=color_enabled))
-        print(_color("│", GOLD, enabled=color_enabled) + _center_cell(f"provider: {settings.provider} · draft-only", body, color=MUTED, enabled=color_enabled) + _color("│", GOLD, enabled=color_enabled))
-        print(_color("│", GOLD, enabled=color_enabled) + _center_cell("My Stand page injects authorized archive context.", body, color=TEXT, enabled=color_enabled) + _color("│", GOLD, enabled=color_enabled))
-        print(_color("╰" + ("─" * body) + "╯", GOLD, enabled=color_enabled))
+    title = f"SuFen v{__version__}"
+    top_rule = max(0, body - _display_width(title) - 2)
+    print(
+        margin
+        + _color("╭─ ", GOLD, enabled=color_enabled)
+        + _color(title, ACCENT, enabled=color_enabled)
+        + _color(" " + ("─" * top_rule) + "╮", GOLD, enabled=color_enabled)
+    )
+    _print_box_center("SuFen", body, color=ACCENT, enabled=color_enabled, margin=margin)
+    _print_box_line(TAGLINE, body, color=GOLD, enabled=color_enabled, margin=margin)
+    _print_box_line("终端入口：通用策略讨论 / 站内ID识别 / 本机调试", body, color=TEXT, enabled=color_enabled, margin=margin)
+    _print_box_line("正式档案：从 My Stand 档案页打开，由后端注入授权资料", body, color=TEXT, enabled=color_enabled, margin=margin)
+    print(margin + _color("├" + ("─" * body) + "┤", GOLD, enabled=color_enabled))
+    _print_box_line(f"模型：{settings.model} · provider：{settings.provider}", body, color=ACCENT, enabled=color_enabled, margin=margin)
+    _print_box_line("上下文：terminal · 未注入 taskPackage · 不读生产档案", body, color=MUTED, enabled=color_enabled, margin=margin)
+    print(margin + _color("╰" + ("─" * body) + "╯", GOLD, enabled=color_enabled))
     print()
 
 
 def print_terminal_intro(settings: SuFenSettings) -> None:
     color_enabled = _stdout_is_tty() and os.environ.get("NO_COLOR") != "1"
     columns = max(64, _terminal_width())
-    status_width = min(columns, max(64, columns - 2))
+    status_width = min(max(64, columns - 2), 96)
+    margin = " " * max(0, (columns - status_width) // 2)
     model = settings.model.split("/")[-1]
-    meter_width = 10
-    print("Welcome to SuFen! Type your message or /help for commands.")
-    print("✦ Tip: 从 My Stand 档案页打开 SuFen，才能带入正式授权资料。")
-    print()
+    print("素分本机入口已就绪。输入 /help 查看命令，/new 新会话，/quit 退出。")
+    print("提示：终端入口不读取生产档案；从 My Stand 档案页打开才会带入授权资料。")
     status = (
-        _color(" S ", GOLD, enabled=color_enabled)
+        _color("SuFen", GOLD, enabled=color_enabled)
+        + _color(" │ ", GOLD, enabled=color_enabled)
+        + _color("terminal", TEXT, enabled=color_enabled)
+        + _color(" │ ", GOLD, enabled=color_enabled)
         + _color(model, TEXT, enabled=color_enabled)
         + _color(" │ ", GOLD, enabled=color_enabled)
-        + _color("ctx --", MUTED, enabled=color_enabled)
-        + _color(" │ ", GOLD, enabled=color_enabled)
-        + _color("[", GOLD, enabled=color_enabled)
-        + _color("░" * meter_width, PALE, enabled=color_enabled)
-        + _color("] --", GOLD, enabled=color_enabled)
-        + _color(" │ ", GOLD, enabled=color_enabled)
-        + _color("0s", MUTED, enabled=color_enabled)
-        + _color(" │ ", GOLD, enabled=color_enabled)
-        + _color("⏲ 0s", MUTED, enabled=color_enabled)
+        + _color("context: none", MUTED, enabled=color_enabled)
     )
-    print(status)
-    print(_rule(status_width))
+    print(margin + status)
 
 
 def terminal_prompt() -> str:
-    return "❯ "
+    return "sufen> "
 
 
 def _compact_query(text: str) -> str:
