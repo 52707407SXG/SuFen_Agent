@@ -9,10 +9,15 @@ from sufen.memory import iter_memory_documents, memory_root, search_human_memory
 from sufen.output import SuFenResponse
 from sufen.property_strategy import build_property_archive_response
 from sufen.provider import (
+    _authorized_context_fallback_response,
+    _compact_sparse_property_answer_if_needed,
+    _extract_json_object,
     _normalize_provider_response_payload,
+    _prefix_property_owner_boundary_if_needed,
     _system_message,
     _task_bound_tool_args,
     build_provider_payload,
+    provider_fail_closed_response,
 )
 from sufen.task_package import (
     AgentDelegationToken,
@@ -144,6 +149,150 @@ def test_provider_system_message_binds_knowledge_graph_and_logs() -> None:
     assert "不得创建 scoped memory" in system
     assert "不得输出 memoryPatch" in system
     assert "memoryPatch 只能写短摘要" not in system
+    assert "汤总" in system
+    assert "某总/某姐/某哥" in system
+    assert "公开资料显示/我查到" in system
+    assert "不得因为用户随口问了一句就输出全维度分析" in system
+
+
+def test_authorized_context_fallback_uses_verified_facts_only() -> None:
+    task = make_task(archiveContext={
+        "companyId": "company-ZYJ",
+        "authorizationId": "AUTH-P-1",
+        "archive": {
+            "id": "P-1",
+            "type": "property",
+            "displayName": "虚拟花园 1-1-101",
+            "ownerName": "汤总",
+            "grade": "A",
+            "score": 88,
+            "status": "谈判中",
+            "summary": "高优先级房源，业主很强势。",
+            "fields": {"楼盘": "虚拟花园", "房号": "1-1-101", "面积": "185平"},
+            "verifiedFacts": {
+                "fields": {"楼盘": "虚拟花园", "房号": "1-1-101", "面积": "185平"},
+                "events": [],
+            },
+            "sourceQuality": {
+                "score": {
+                    "status": "legacy_unverified_score",
+                    "value": 88,
+                    "usableAsCurrentFact": False,
+                    "reason": "只有旧顶层 score。",
+                },
+                "evidenceCompleteness": {
+                    "status": "current_facts_sparse",
+                    "reason": "当前可见字段偏少。",
+                },
+            },
+        },
+        "dialogueLogBrief": [],
+        "requiredKnowledgeGraph": {
+            "requiredName": "房源维护",
+            "status": "configured_placeholder",
+            "refId": "KGREF-property-maintenance",
+        },
+        "knowledgeGraphBinding": {
+            "requiredName": "房源维护",
+            "status": "configured_placeholder",
+            "requiredRefId": "KGREF-property-maintenance",
+        },
+    })
+    response = _authorized_context_fallback_response(
+        prompt="上一轮输出错误地要求用户补站内ID。\n这套房子怎么样？",
+        previous_response=SuFenResponse(answer="缺关键资料"),
+        task=task,
+        loop_audit=[],
+    )
+    assert "虚拟花园" in response.answer
+    assert "185平" in response.answer
+    assert "谈判中" not in response.answer
+    assert "高优先级" not in response.answer
+    assert "很强势" not in response.answer
+    assert "88" not in response.answer
+    assert "汤总" not in response.answer
+    assert "上一轮输出错误" not in response.answer
+    assert "站内ID" not in response.answer
+    assert "评分未校验" in response.answer
+    assert "现在不要硬下结论" in response.answer
+    assert response.evidenceUsed[0].confidence <= 0.6
+    assert response.dialogueDigest is not None
+    assert response.dialogueDigest.subjectRelevance.shouldPersist is False
+
+
+def test_sparse_property_broad_question_is_compacted() -> None:
+    task = make_task(archiveContext={
+        "companyId": "company-ZYJ",
+        "archive": {
+            "id": "P-1",
+            "type": "property",
+            "displayName": "虚拟花园 1-1-101",
+            "fields": {"楼盘": "虚拟花园", "房号": "1-1-101", "面积": "185平", "户型": "四室两厅", "报价": "880万"},
+            "verifiedFacts": {
+                "fields": {"楼盘": "虚拟花园", "房号": "1-1-101", "面积": "185平", "户型": "四室两厅", "报价": "880万"},
+                "events": [],
+            },
+            "sourceQuality": {
+                "evidenceCompleteness": {"status": "current_facts_sparse"},
+            },
+        },
+    })
+    response = SuFenResponse(
+        answer="\n".join([
+            "已知事实",
+            "1. 楼盘虚拟花园",
+            "2. 面积185平",
+            "3. 报价880万",
+            "4. 缺知识图谱",
+            "5. 缺评分卡",
+            "6. 缺公开行情",
+            "7. 缺业主特征卡",
+            "8. 缺带看反馈",
+        ]) * 20,
+        dialogueDigest={
+            "coreIntent": "判断这套房子怎么样",
+            "discussionSummary": "模型输出过长。",
+            "finalOutcome": "未形成结论。",
+            "userAcceptance": "unclear",
+            "subjectRelevance": {"level": "direct", "shouldPersist": True, "reason": "模型误判。"},
+        },
+    )
+    compact = _compact_sparse_property_answer_if_needed(response, task=task, prompt="这套房子怎么样？")
+    assert len(compact.answer) < 320
+    assert "不能给等级、分数或成交概率" in compact.answer
+    assert "provider.postprocess" in {item.tool for item in compact.toolAudit}
+    assert compact.dialogueDigest is not None
+    assert compact.dialogueDigest.subjectRelevance.shouldPersist is False
+
+
+def test_owner_communication_gets_evidence_boundary_prefix() -> None:
+    task = make_task(archiveContext={
+        "companyId": "company-ZYJ",
+        "archive": {
+            "id": "P-1",
+            "type": "property",
+            "fields": {"业主姓名": "汤总"},
+            "verifiedFacts": {"fields": {"业主姓名": "汤总"}, "events": [{"id": "evt-1", "title": "上周未接电话"}]},
+            "sourceQuality": {
+                "subjectFeatureCard": {"status": "not_loaded"},
+                "evidenceCompleteness": {"status": "current_facts_sparse"},
+            },
+        },
+    })
+    response = SuFenResponse(
+        answer="开口可以先问汤总什么时候方便聊房子。",
+        dialogueDigest={
+            "coreIntent": "问业主怎么沟通",
+            "discussionSummary": "给了话术。",
+            "finalOutcome": "建议先联系。",
+            "userAcceptance": "unclear",
+            "subjectRelevance": {"level": "direct", "shouldPersist": True, "reason": "围绕业主沟通。"},
+        },
+    )
+    patched = _prefix_property_owner_boundary_if_needed(response, task=task, prompt="这个业主怎么开口比较好？")
+    assert patched.answer.startswith("目前只能低置信度处理")
+    assert "不能判断业主态度或价格心理" in patched.answer
+    assert "provider.postprocess" in {item.tool for item in patched.toolAudit}
 
 
 def test_provider_normalization_forces_memory_patch_null_and_cleans_dialogue_digest() -> None:
@@ -164,6 +313,18 @@ def test_provider_normalization_forces_memory_patch_null_and_cleans_dialogue_dig
     assert response.dialogueDigest is not None
     assert response.dialogueDigest.userAcceptance == "accepted"
     assert response.dialogueDigest.subjectRelevance.shouldPersist is True
+
+
+def test_provider_fail_closed_keeps_dialogue_digest_contract() -> None:
+    response = provider_fail_closed_response("tool_loop_exceeded", "max_turns:4")
+    assert response.dialogueDigest is not None
+    assert response.dialogueDigest.subjectRelevance.shouldPersist is False
+    assert "未形成可入档的业务结论" in response.dialogueDigest.finalOutcome
+
+
+def test_provider_json_extraction_tolerates_control_characters() -> None:
+    payload = _extract_json_object('{"answer":"第一行\n第二行","memoryPatch":null}')
+    assert payload["answer"] == "第一行\n第二行"
 
 
 def test_provider_tool_args_strip_memory_scope() -> None:

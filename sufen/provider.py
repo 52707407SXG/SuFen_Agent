@@ -60,12 +60,12 @@ def _extract_json_object(text: str) -> dict[str, Any]:
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text).strip()
     try:
-        payload = json.loads(text)
+        payload = json.loads(text, strict=False)
     except json.JSONDecodeError:
         match = re.search(r"\{.*\}", text, flags=re.S)
         if not match:
             raise ProviderError("provider response did not contain JSON") from None
-        payload = json.loads(match.group(0))
+        payload = json.loads(match.group(0), strict=False)
     if not isinstance(payload, dict):
         raise ProviderError("provider response JSON must be an object")
     return payload
@@ -621,16 +621,28 @@ def _archive_title(archive: dict[str, Any], task: SuFenTaskPackage) -> str:
 
 def _fallback_field_rows(archive: dict[str, Any]) -> list[tuple[str, str]]:
     rows: list[tuple[str, str]] = []
-    for key in ("id", "type", "displayName", "ownerName", "grade", "score", "status", "summary"):
-        value = _text(archive.get(key))
-        if value:
-            rows.append((key, value))
-    fields = archive.get("fields")
+    title = _text(archive.get("displayName")) or _text(archive.get("name")) or _text(archive.get("id"))
+    if title:
+        rows.append(("档案标题", title))
+    verified = archive.get("verifiedFacts") if isinstance(archive.get("verifiedFacts"), dict) else {}
+    fields = verified.get("fields") if isinstance(verified.get("fields"), dict) else archive.get("fields")
     if isinstance(fields, dict):
         for key, value in fields.items():
             text = _text(value)
             if text:
                 rows.append((str(key), text))
+    events = verified.get("events") if isinstance(verified.get("events"), list) else archive.get("events")
+    if isinstance(events, list) and events:
+        rows.append(("当前事件", f"{len(events)} 条已授权事件，仅按事件原文做事实来源"))
+    source_quality = archive.get("sourceQuality") if isinstance(archive.get("sourceQuality"), dict) else {}
+    score_quality = source_quality.get("score") if isinstance(source_quality.get("score"), dict) else {}
+    if score_quality:
+        status = _text(score_quality.get("status")) or "unknown"
+        usable = bool(score_quality.get("usableAsCurrentFact"))
+        rows.append(("评分证据", "已校验结构化评分" if usable else f"评分未校验（{status}），不能当正式分数"))
+    completeness = source_quality.get("evidenceCompleteness") if isinstance(source_quality.get("evidenceCompleteness"), dict) else {}
+    if completeness:
+        rows.append(("资料厚度", _text(completeness.get("reason"))[:240]))
     return rows[:24]
 
 
@@ -655,33 +667,31 @@ def _authorized_context_fallback_response(
         "| 字段 | 内容 |\n|---|---|\n"
         f"{rows_markdown}\n\n"
         "**判断**\n"
-        f"- 以上内容来自 My Stand 后端本轮已授权注入的 taskPackage，不需要再补当前档案站内ID。\n"
-        "- 本轮只围绕当前 operator + subject 的任务范围回答，不引用其他经纪人或其他档案。\n\n"
+        "- 以上只列 My Stand 本轮已授权的可展示事实和证据状态；旧状态、旧摘要、旧分数、称呼和历史日志不在这里当事实使用。\n"
+        "- 如果你问的是“这套房子怎么样”，这份兜底回答只能低置信度收口，不能替代房源笔记、公开行情、带看反馈和业主沟通证据。\n\n"
         "**下一步**\n"
-        "1. 先按表格里的关键事实确认沟通目标。\n"
-        "2. 本轮真正重要的业务判断由 My Stand 写入 SuFen 日志摘要，SuFen 自己不写长期 memory。\n"
+        "1. 先补一个关键证据：房源笔记、同小区同户型行情、最近带看反馈或业主真实底线。\n"
+        "2. 证据补齐后再判断等级、维护策略或话术；现在不要硬下结论。\n"
         "3. 如果要生成事件、字段修改或外发话术，继续走草稿确认，不直接写正式数据。"
     )
-    if prompt:
-        answer += f"\n\n**本轮问题**\n\n{prompt.strip()[:1200]}"
     return SuFenResponse(
         answer=answer,
         dialogueDigest=DialogueDigest(
             coreIntent=f"读取当前{scene}档案并围绕本轮问题给出初步判断",
             discussionSummary=f"模型误判缺资料后，SuFen 使用 My Stand 后端已授权注入的 taskPackage 读取当前档案 {title}，并提示后续按当前档案事实确认沟通目标。",
-            finalOutcome="本轮给出基于当前授权档案的初步判断，后续是否入档交由 My Stand 后端相关性过滤。",
+            finalOutcome="本轮只给出基于当前授权事实卡的低置信度兜底说明，未形成可入档的正式业务判断。",
             userAcceptance="unclear",
             subjectRelevance=DialogueSubjectRelevance(
                 level="direct" if subject_payload else "none",
-                shouldPersist=bool(subject_payload),
-                reason="兜底回答围绕当前 taskPackage 注入的档案对象。" if subject_payload else "缺少当前档案对象，不建议沉淀。",
+                shouldPersist=False,
+                reason="兜底回答只用于纠正模型缺资料误判，低置信度且未形成正式业务结论，不建议沉淀。" if subject_payload else "缺少当前档案对象，不建议沉淀。",
             ),
         ),
         evidenceUsed=[
             EvidenceItem(
                 source="taskPackage.archiveContext",
                 summary=f"模型误判缺资料后，SuFen 按后端授权 taskPackage 读取当前资料：{facts_text[:1000] or title}",
-                confidence=0.72,
+                confidence=0.58,
             )
         ],
         missingAuthorizationRequests=[],
@@ -701,6 +711,98 @@ def _authorized_context_fallback_response(
             ),
         ],
     )
+
+
+def _compact_sparse_property_answer_if_needed(
+    response: SuFenResponse,
+    *,
+    task: SuFenTaskPackage,
+    prompt: str,
+) -> SuFenResponse:
+    if task.subject.type != "property":
+        return response
+    if not re.search(r"这套房子怎么样|这套房.*怎么样|能不能算好房|值不值得|怎么判断|房子到底", prompt or ""):
+        return response
+    archive = task.archiveContext.get("archive") if isinstance(task.archiveContext, dict) else {}
+    if not isinstance(archive, dict):
+        return response
+    source_quality = archive.get("sourceQuality") if isinstance(archive.get("sourceQuality"), dict) else {}
+    completeness = source_quality.get("evidenceCompleteness") if isinstance(source_quality.get("evidenceCompleteness"), dict) else {}
+    if completeness.get("status") != "current_facts_sparse":
+        return response
+    answer = response.answer or ""
+    numbered_items = len(re.findall(r"(?:^|\n)\s*(?:[-*]|\d+[.、])\s+", answer))
+    if len(answer) <= 620 and numbered_items <= 4:
+        return response
+
+    verified = archive.get("verifiedFacts") if isinstance(archive.get("verifiedFacts"), dict) else {}
+    fields = verified.get("fields") if isinstance(verified.get("fields"), dict) else archive.get("fields")
+    facts: list[str] = []
+    if isinstance(fields, dict):
+        for key in ("楼盘", "房号", "面积", "户型", "报价", "装修"):
+            value = _text(fields.get(key))
+            if value:
+                facts.append(f"{key}{value}")
+            if len(facts) >= 4:
+                break
+    facts_text = "，".join(facts) or "当前只看到很少的基础字段"
+    response.answer = (
+        f"现在只能低置信度看：{facts_text}。"
+        "房源笔记、同小区同户型公开行情、带看反馈和业主底线都没核实，我不能给等级、分数或成交概率。"
+        "下一步先补一个关键证据：把房源笔记和同户型行情核出来，再判断这套房子值不值得重点维护。"
+    )
+    if response.dialogueDigest is not None:
+        response.dialogueDigest.discussionSummary = (
+            "当前房源事实稀疏，SuFen 收住回答，只保留已知字段、关键缺口和一个补数动作。"
+        )
+        response.dialogueDigest.finalOutcome = "本轮未形成房源等级、评分或成交概率判断，下一步先补房源笔记和同户型行情。"
+        response.dialogueDigest.subjectRelevance.shouldPersist = False
+        response.dialogueDigest.subjectRelevance.reason = "资料稀疏的克制回答，不作为正式维护结论沉淀。"
+    response.toolAudit.append(
+        ToolAuditItem(
+            tool="provider.postprocess",
+            action="compact_sparse_property_answer",
+            status="ok",
+        )
+    )
+    return response
+
+
+def _prefix_property_owner_boundary_if_needed(
+    response: SuFenResponse,
+    *,
+    task: SuFenTaskPackage,
+    prompt: str,
+) -> SuFenResponse:
+    if task.subject.type != "property":
+        return response
+    if not re.search(r"业主.*(怎么|沟通|开口|聊|话术)|这个业主|这种业主", prompt or ""):
+        return response
+    archive = task.archiveContext.get("archive") if isinstance(task.archiveContext, dict) else {}
+    if not isinstance(archive, dict):
+        return response
+    source_quality = archive.get("sourceQuality") if isinstance(archive.get("sourceQuality"), dict) else {}
+    subject_card = source_quality.get("subjectFeatureCard") if isinstance(source_quality.get("subjectFeatureCard"), dict) else {}
+    completeness = source_quality.get("evidenceCompleteness") if isinstance(source_quality.get("evidenceCompleteness"), dict) else {}
+    if subject_card.get("status") not in {"not_loaded", "configured_empty", "missing", ""} and completeness.get("status") != "current_facts_sparse":
+        return response
+    answer = response.answer or ""
+    if re.search(r"只看到|只能看到|不能判断|没法判断|未确认|低置信|线索|资料不足|证据", answer):
+        return response
+    prefix = "目前只能低置信度处理：我看不到业主特征卡和完整沟通记录，不能判断业主态度或价格心理。"
+    response.answer = f"{prefix}\n\n{answer}"
+    if response.dialogueDigest is not None:
+        response.dialogueDigest.discussionSummary = (
+            "当前业主资料不足，SuFen 已先补充证据边界，再给低风险沟通话术。"
+        )
+    response.toolAudit.append(
+        ToolAuditItem(
+            tool="provider.postprocess",
+            action="prefix_property_owner_boundary",
+            status="ok",
+        )
+    )
+    return response
 
 
 def _serialize_tool_result(result: Any) -> str:
@@ -827,6 +929,13 @@ def _request_provider(settings: SuFenSettings, messages: list[dict[str, Any]], p
 def missing_task_package_response() -> SuFenResponse:
     return SuFenResponse(
         answer=FAIL_CLOSED_MESSAGE,
+        dialogueDigest=DialogueDigest(
+            coreIntent="缺少 My Stand taskPackage，无法进入受控档案分析",
+            discussionSummary="SuFen 没有收到后端授权的当前任务包，因此不能读取档案或做业务判断。",
+            finalOutcome="本轮未形成业务结论，需要 My Stand 后端重新发起带 taskPackage 的请求。",
+            userAcceptance="unclear",
+            subjectRelevance=DialogueSubjectRelevance(level="none", shouldPersist=False, reason="缺少 taskPackage，不属于任何当前档案。"),
+        ),
         missingAuthorizationRequests=[
             AuthorizationRequest(
                 reason="missing_task_package",
@@ -843,6 +952,13 @@ def missing_task_package_response() -> SuFenResponse:
 def provider_fail_closed_response(reason: str, status: str) -> SuFenResponse:
     return SuFenResponse(
         answer=FAIL_CLOSED_MESSAGE,
+        dialogueDigest=DialogueDigest(
+            coreIntent="SuFen provider 或工具链未能完成本轮受控回答",
+            discussionSummary=f"SuFen 因 {reason} 进入 fail-closed 分支，没有把不完整资料包装成业务判断。",
+            finalOutcome="本轮未形成可入档的业务结论，需要重新获取资料或恢复 provider/tool 配置后再判断。",
+            userAcceptance="unclear",
+            subjectRelevance=DialogueSubjectRelevance(level="none", shouldPersist=False, reason=f"fail-closed: {status}"),
+        ),
         missingAuthorizationRequests=[
             AuthorizationRequest(
                 reason=reason,
@@ -893,12 +1009,17 @@ def answer_with_provider(
                     prompt = _authorized_context_retry_prompt(prompt, response, task)
                     messages = build_provider_messages(prompt, task)
                     continue
-                return _authorized_context_fallback_response(
+                response = _authorized_context_fallback_response(
                     prompt=prompt,
                     previous_response=response,
                     task=task,
                     loop_audit=loop_audit,
                 )
+                response = _compact_sparse_property_answer_if_needed(response, task=task, prompt=prompt)
+                response = _prefix_property_owner_boundary_if_needed(response, task=task, prompt=prompt)
+                return response
+            response = _compact_sparse_property_answer_if_needed(response, task=task, prompt=prompt)
+            response = _prefix_property_owner_boundary_if_needed(response, task=task, prompt=prompt)
             response.toolAudit.extend(loop_audit)
             response.toolAudit.append(
                 ToolAuditItem(tool="provider.chat_completions", action="real_provider_request", status=f"ok_turns:{turn}")
@@ -918,21 +1039,27 @@ def answer_with_provider(
             response = provider_fail_closed_response("unauthorized_tool_call", f"rejected: {exc}")
             response.toolAudit.extend(loop_audit)
             if _has_backend_authorized_context(task):
-                return _authorized_context_fallback_response(
+                response = _authorized_context_fallback_response(
                     prompt=prompt,
                     previous_response=response,
                     task=task,
                     loop_audit=loop_audit,
                 )
+                response = _compact_sparse_property_answer_if_needed(response, task=task, prompt=prompt)
+                response = _prefix_property_owner_boundary_if_needed(response, task=task, prompt=prompt)
+                return response
             return response
 
     response = provider_fail_closed_response("tool_loop_exceeded", f"max_turns:{MAX_TOOL_LOOP_TURNS}")
     response.toolAudit.extend(loop_audit)
     if _has_backend_authorized_context(task):
-        return _authorized_context_fallback_response(
+        response = _authorized_context_fallback_response(
             prompt=prompt,
             previous_response=response,
             task=task,
             loop_audit=loop_audit,
         )
+        response = _compact_sparse_property_answer_if_needed(response, task=task, prompt=prompt)
+        response = _prefix_property_owner_boundary_if_needed(response, task=task, prompt=prompt)
+        return response
     return response

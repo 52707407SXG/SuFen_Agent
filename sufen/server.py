@@ -13,7 +13,7 @@ from sufen import __version__
 from sufen.auth import FAIL_CLOSED_MESSAGE
 from sufen.chat import answer_sufen
 from sufen.config import load_settings
-from sufen.output import AuthorizationRequest, SuFenResponse, ToolAuditItem
+from sufen.output import AuthorizationRequest, DialogueDigest, DialogueSubjectRelevance, SuFenResponse, ToolAuditItem
 from sufen.provider import ProviderError
 from sufen.task_package import SuFenTaskPackage
 
@@ -71,6 +71,13 @@ def create_app() -> FastAPI:
         if request.taskPackage is None:
             response = SuFenResponse(
                 answer=FAIL_CLOSED_MESSAGE,
+                dialogueDigest=DialogueDigest(
+                    coreIntent="缺少 My Stand taskPackage，无法进入受控档案分析",
+                    discussionSummary="SuFen 没有收到后端授权的当前任务包，因此不能读取档案或做业务判断。",
+                    finalOutcome="本轮未形成业务结论，需要 My Stand 后端重新发起带 taskPackage 的请求。",
+                    userAcceptance="unclear",
+                    subjectRelevance=DialogueSubjectRelevance(level="none", shouldPersist=False, reason="缺少 taskPackage，不属于任何当前档案。"),
+                ),
                 missingAuthorizationRequests=[
                     AuthorizationRequest(
                         reason="missing_task_package",
@@ -88,6 +95,13 @@ def create_app() -> FastAPI:
         except (ProviderError, ValueError) as exc:
             response = SuFenResponse(
                 answer=FAIL_CLOSED_MESSAGE,
+                dialogueDigest=DialogueDigest(
+                    coreIntent="SuFen 未能完成本轮受控回答",
+                    discussionSummary=f"SuFen 进入 fail-closed 分支：{exc}",
+                    finalOutcome="本轮未形成可入档的业务结论，需要恢复 provider/tool 输出后再判断。",
+                    userAcceptance="unclear",
+                    subjectRelevance=DialogueSubjectRelevance(level="none", shouldPersist=False, reason="server_fail_closed"),
+                ),
                 missingAuthorizationRequests=[
                     AuthorizationRequest(
                         reason="unsafe_task_package",
