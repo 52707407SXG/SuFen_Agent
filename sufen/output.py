@@ -61,8 +61,23 @@ class ToolAuditItem(BaseModel):
     draftOnly: bool = True
 
 
+class DialogueSubjectRelevance(BaseModel):
+    level: Literal["direct", "indirect", "none"] = "none"
+    shouldPersist: bool = False
+    reason: str = ""
+
+
+class DialogueDigest(BaseModel):
+    coreIntent: str = ""
+    discussionSummary: str = ""
+    finalOutcome: str = ""
+    userAcceptance: Literal["accepted", "rejected", "unclear", "chat"] = "unclear"
+    subjectRelevance: DialogueSubjectRelevance = Field(default_factory=DialogueSubjectRelevance)
+
+
 class SuFenResponse(BaseModel):
     answer: str
+    dialogueDigest: DialogueDigest | None = None
     evidenceUsed: list[EvidenceItem] = Field(default_factory=list)
     missingAuthorizationRequests: list[AuthorizationRequest] = Field(default_factory=list)
     eventDrafts: list[EventDraft] = Field(default_factory=list)

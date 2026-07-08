@@ -12,7 +12,7 @@ from pydantic import ValidationError
 
 from sufen.auth import FAIL_CLOSED_MESSAGE, extract_authorization_refs
 from sufen.config import SuFenSettings, load_settings
-from sufen.output import AuthorizationRequest, EvidenceItem, SuFenResponse, ToolAuditItem
+from sufen.output import AuthorizationRequest, DialogueDigest, DialogueSubjectRelevance, EvidenceItem, SuFenResponse, ToolAuditItem
 from sufen.prompt.identity import build_sufen_identity_block
 from sufen.task_package import SuFenTaskPackage, ensure_safe_actions
 from sufen.time import now as sufen_now
@@ -249,8 +249,58 @@ def _normalize_memory_list(value: Any) -> list[str]:
     return [str(value).strip()]
 
 
+def _normalize_dialogue_digest(value: Any) -> dict[str, Any] | None:
+    if value in (None, "", [], {}):
+        return None
+    if not isinstance(value, dict):
+        text = str(value).strip()
+        return {
+            "coreIntent": text[:160],
+            "discussionSummary": "",
+            "finalOutcome": "",
+            "userAcceptance": "unclear",
+            "subjectRelevance": {"level": "none", "shouldPersist": False, "reason": "dialogueDigest was not an object"},
+        }
+    clean = dict(value)
+    acceptance = str(clean.get("userAcceptance") or "").strip().lower()
+    acceptance_map = {
+        "accept": "accepted",
+        "accepted": "accepted",
+        "yes": "accepted",
+        "adopted": "accepted",
+        "采纳": "accepted",
+        "已采纳": "accepted",
+        "reject": "rejected",
+        "rejected": "rejected",
+        "no": "rejected",
+        "未采纳": "rejected",
+        "不同意": "rejected",
+        "chat": "chat",
+        "casual": "chat",
+        "闲聊": "chat",
+        "寒暄": "chat",
+        "unclear": "unclear",
+    }
+    relevance = clean.get("subjectRelevance") if isinstance(clean.get("subjectRelevance"), dict) else {}
+    level = str(relevance.get("level") or "").strip().lower()
+    if level not in {"direct", "indirect", "none"}:
+        level = "none"
+    return {
+        "coreIntent": str(clean.get("coreIntent") or "").strip()[:220],
+        "discussionSummary": str(clean.get("discussionSummary") or "").strip()[:620],
+        "finalOutcome": str(clean.get("finalOutcome") or "").strip()[:320],
+        "userAcceptance": acceptance_map.get(acceptance, "unclear"),
+        "subjectRelevance": {
+            "level": level,
+            "shouldPersist": bool(relevance.get("shouldPersist") is True),
+            "reason": str(relevance.get("reason") or "").strip()[:320],
+        },
+    }
+
+
 def _normalize_provider_response_payload(payload: dict[str, Any]) -> dict[str, Any]:
     clean = dict(payload)
+    clean["dialogueDigest"] = _normalize_dialogue_digest(clean.get("dialogueDigest"))
     if isinstance(clean.get("evidenceUsed"), list):
         clean["evidenceUsed"] = [
             _normalize_evidence_item(item, index)
@@ -422,6 +472,17 @@ def _system_message(task: SuFenTaskPackage) -> str:
     }
     output_contract = {
         "answer": "string",
+        "dialogueDigest": {
+            "coreIntent": "一句话写清用户真正想解决什么",
+            "discussionSummary": "两三句话压缩本轮讨论过程：SuFen 建议、用户是否反对、如何调整",
+            "finalOutcome": "一句话写最后采纳、暂定或未形成结论的结果",
+            "userAcceptance": "accepted|rejected|unclear|chat",
+            "subjectRelevance": {
+                "level": "direct|indirect|none",
+                "shouldPersist": False,
+                "reason": "为什么这条摘要跟当前档案有关；无关时说明不应沉淀",
+            },
+        },
         "evidenceUsed": [],
         "missingAuthorizationRequests": [],
         "eventDrafts": [],
@@ -444,6 +505,7 @@ def _system_message(task: SuFenTaskPackage) -> str:
         "My Stand taskPackage.archiveContext.archive、archiveContext.broker、archiveContext.archiveRows、archiveSummary、parserToolResults、referenceContext 和 systemFoundationContext 是后端已按权限注入的当前可读资料；只要这些字段里已有当前档案资料，必须直接读取并据此回答，不得因为用户没有额外粘贴 AUTH/OUT/KGREF 就说当前档案缺资料。",
         "必须遵守 taskPackage.archiveContext.contextLoadPlan：先用 loaded 层轻量回应或确认意图，目标明确后再按触发条件展开特征卡、房源笔记、图片/OCR、知识图谱等未加载层；未标记 loaded 的资料不得假装已读。",
         "必须遵守 requiredKnowledgeGraph/knowledgeGraphBinding：经纪人个人业务档案只用“经纪人成长路径”，房源维护只用“房源维护”，客户跟进只用“客户跟进”，售后维护只用“售后维护”。图谱缺失、未授权或为空时必须明说低置信度，不能换用别的图谱。",
+        "每轮必须填写 dialogueDigest，专供 My Stand 后端判断是否写入查看日志。dialogueDigest 要极致压缩但准确：coreIntent 一句话，discussionSummary 两三句话，finalOutcome 一句话；subjectRelevance.shouldPersist 必须保守，只有内容确实服务当前入口和当前档案对象时才为 true。寒暄、闲聊、测试能力、跑题、别的档案内容、原始附件全文、临时财务明细都不得建议沉淀。",
         _authorized_context_card(task),
         "所有事件和字段修改都只能作为 draft 返回，不能直接写正式数据；SuFen 不返回记忆修改草稿。",
     ])
@@ -603,6 +665,17 @@ def _authorized_context_fallback_response(
         answer += f"\n\n**本轮问题**\n\n{prompt.strip()[:1200]}"
     return SuFenResponse(
         answer=answer,
+        dialogueDigest=DialogueDigest(
+            coreIntent=f"读取当前{scene}档案并围绕本轮问题给出初步判断",
+            discussionSummary=f"模型误判缺资料后，SuFen 使用 My Stand 后端已授权注入的 taskPackage 读取当前档案 {title}，并提示后续按当前档案事实确认沟通目标。",
+            finalOutcome="本轮给出基于当前授权档案的初步判断，后续是否入档交由 My Stand 后端相关性过滤。",
+            userAcceptance="unclear",
+            subjectRelevance=DialogueSubjectRelevance(
+                level="direct" if subject_payload else "none",
+                shouldPersist=bool(subject_payload),
+                reason="兜底回答围绕当前 taskPackage 注入的档案对象。" if subject_payload else "缺少当前档案对象，不建议沉淀。",
+            ),
+        ),
         evidenceUsed=[
             EvidenceItem(
                 source="taskPackage.archiveContext",

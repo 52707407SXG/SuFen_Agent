@@ -139,19 +139,31 @@ def test_provider_system_message_binds_knowledge_graph_and_logs() -> None:
     assert "经纪人个人业务档案只用“经纪人成长路径”" in system
     assert "房源维护只用“房源维护”" in system
     assert "dialogueLogKey" in system
+    assert "dialogueDigest" in system
+    assert "subjectRelevance.shouldPersist 必须保守" in system
     assert "不得创建 scoped memory" in system
     assert "不得输出 memoryPatch" in system
     assert "memoryPatch 只能写短摘要" not in system
 
 
-def test_provider_normalization_forces_memory_patch_null() -> None:
+def test_provider_normalization_forces_memory_patch_null_and_cleans_dialogue_digest() -> None:
     payload = _normalize_provider_response_payload({
         "answer": "收到",
+        "dialogueDigest": {
+            "coreIntent": "看看这套房源怎么谈",
+            "discussionSummary": "先判断业主底线。",
+            "finalOutcome": "下一步先约业主复盘带看反馈。",
+            "userAcceptance": "采纳",
+            "subjectRelevance": {"level": "direct", "shouldPersist": True, "reason": "围绕当前房源维护。"},
+        },
         "memoryPatch": {"businessFacts": ["不该写"]},
         "toolAudit": [{"tool": "provider.chat_completions", "action": "x", "status": "ok"}],
     })
     response = SuFenResponse.model_validate(payload)
     assert response.memoryPatch is None
+    assert response.dialogueDigest is not None
+    assert response.dialogueDigest.userAcceptance == "accepted"
+    assert response.dialogueDigest.subjectRelevance.shouldPersist is True
 
 
 def test_provider_tool_args_strip_memory_scope() -> None:
