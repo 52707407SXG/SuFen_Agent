@@ -409,7 +409,8 @@ def _authorized_context_card(task: SuFenTaskPackage) -> str:
     return (
         f"{AUTHORIZED_CONTEXT_RETRY_MARKER}：以下内容由 My Stand 后端按当前登录账号权限注入，"
         "就是本轮当前档案/经纪人档案的可读资料。用户问“当前档案”“这个客户/业主/售后/经纪人”时，"
-        "必须优先直接读取这里的事实并回答，不得要求用户再提供站内ID。\n"
+        "必须优先读取这里的资料并回答，不得要求用户再提供站内ID；但必须严格遵守 sourceQuality、"
+        "verifiedFacts、legacySignals 和 dialogueLogBrief 的证据分级，usableAsCurrentFact=false 的内容不能说成当前事实。\n"
         + json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2)[:30_000]
     )
 
@@ -502,7 +503,7 @@ def _system_message(task: SuFenTaskPackage) -> str:
         "SuFen 的长期 memory 是单一人工维护根目录，只能通过 sufen_memory_search 只读检索；模型不得自选 memoryRoot，不得创建 scoped memory，不得输出 memoryPatch："
         + json.dumps(scope, ensure_ascii=False, sort_keys=True),
         _runtime_anchor_card(task),
-        "My Stand taskPackage.archiveContext.archive、archiveContext.broker、archiveContext.archiveRows、archiveSummary、parserToolResults、referenceContext 和 systemFoundationContext 是后端已按权限注入的当前可读资料；只要这些字段里已有当前档案资料，必须直接读取并据此回答，不得因为用户没有额外粘贴 AUTH/OUT/KGREF 就说当前档案缺资料。",
+        "My Stand taskPackage.archiveContext.archive、archiveContext.broker、archiveContext.archiveRows、archiveSummary、parserToolResults、referenceContext 和 systemFoundationContext 是后端已按权限注入的当前可读资料；只要这些字段里已有当前档案资料，必须直接读取并据此回答，不得因为用户没有额外粘贴 AUTH/OUT/KGREF 就说当前档案缺资料。但 archive 内部必须按 verifiedFacts/sourceQuality/legacySignals 分级使用，usableAsCurrentFact=false 的内容只能做低置信度线索，不能当当前事实。",
         "必须遵守 taskPackage.archiveContext.contextLoadPlan：先用 loaded 层轻量回应或确认意图，目标明确后再按触发条件展开特征卡、房源笔记、图片/OCR、知识图谱等未加载层；未标记 loaded 的资料不得假装已读。",
         "必须遵守 requiredKnowledgeGraph/knowledgeGraphBinding：经纪人个人业务档案只用“经纪人成长路径”，房源维护只用“房源维护”，客户跟进只用“客户跟进”，售后维护只用“售后维护”。图谱缺失、未授权或为空时必须明说低置信度，不能换用别的图谱。",
         "每轮必须填写 dialogueDigest，专供 My Stand 后端判断是否写入查看日志。dialogueDigest 要极致压缩但准确：coreIntent 一句话，discussionSummary 两三句话，finalOutcome 一句话；subjectRelevance.shouldPersist 必须保守，只有内容确实服务当前入口和当前档案对象时才为 true。寒暄、闲聊、测试能力、跑题、别的档案内容、原始附件全文、临时财务明细都不得建议沉淀。",
