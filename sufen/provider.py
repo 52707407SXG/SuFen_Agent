@@ -21,6 +21,13 @@ from toolsets import SUFEN_TOOL_NAMES
 
 MAX_TOOL_LOOP_TURNS = 4
 AUTHORIZED_CONTEXT_RETRY_MARKER = "后端已授权当前资料事实卡"
+BUSINESS_INTENT_RE = re.compile(
+    r"房源|房子|业主|客户|客源|售后|经纪人|业绩|成交|签单|价格|报价|底价|降价|维护|带看|挂牌|谈判|沟通|"
+    r"话术|策略|判断|分析|怎么看|怎么样|怎么聊|怎么谈|怎么办|下一步|资料|档案|图谱|结算|合同|回款|"
+    r"评分|等级|概率|行情|同户型|装修|税费"
+)
+GREETING_RE = re.compile(r"^(?:sufen|su\s*fen|素分|素芬|苏芬|苏分)?(?:，|,|\s)*(你好|晚上好|早上好|中午好|下午好|晚安|在吗|还在吗|睡了吗)[。！？!?，,\s]*$", re.I)
+ACK_RE = re.compile(r"^(?:sufen|su\s*fen|素分|素芬|苏芬|苏分)?(?:，|,|\s)*(收到|好的|好|嗯|行|谢谢|辛苦了)[。！？!?，,\s]*$", re.I)
 
 
 class ProviderError(RuntimeError):
@@ -52,6 +59,88 @@ def _chat_completions_url(settings: SuFenSettings) -> str:
     if base.endswith("/v1"):
         return f"{base}/chat/completions"
     return f"{base}/v1/chat/completions"
+
+
+def _archive_context(task: SuFenTaskPackage) -> dict[str, Any]:
+    return task.archiveContext if isinstance(task.archiveContext, dict) else {}
+
+
+def _raw_user_message(prompt: str, task: SuFenTaskPackage) -> str:
+    archive_context = _archive_context(task)
+    for key in ("userMessageForSufen", "userMessage", "rawUserMessage", "latestUserMessage"):
+        value = archive_context.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    text = str(prompt or "").strip()
+    for pattern in (
+        r"用户本轮原话(?:（最高优先用于意图判断）)?：\s*(.*?)(?:\n\n|$)",
+        r"经纪人问题：\s*(.*?)(?:\n\nMy Stand 后端注入|$)",
+    ):
+        match = re.search(pattern, text, flags=re.S)
+        if match and match.group(1).strip():
+            return match.group(1).strip()
+    return text
+
+
+def _classify_user_intent(prompt: str, task: SuFenTaskPackage) -> str:
+    archive_context = _archive_context(task)
+    raw_backend_intent = str(archive_context.get("sufenUserIntent") or archive_context.get("userIntent") or "").strip()
+    if raw_backend_intent in {
+        "casual_greeting",
+        "casual_ack",
+        "fact_query",
+        "strategy_question",
+        "owner_communication",
+        "report_request",
+        "business_question",
+    }:
+        return raw_backend_intent
+    raw = _raw_user_message(prompt, task)
+    compact = re.sub(r"\s+", "", raw)
+    if not compact:
+        return "unknown"
+    has_business = bool(BUSINESS_INTENT_RE.search(compact))
+    if GREETING_RE.match(compact) and not has_business:
+        return "casual_greeting"
+    if ACK_RE.match(compact) and not has_business:
+        return "casual_ack"
+    if re.search(r"业主.*(怎么|沟通|开口|聊|话术)|这个业主|这种业主", compact):
+        return "owner_communication"
+    if re.search(r"报告|复盘|完整分析|全面分析|展开说|详细", compact):
+        return "report_request"
+    if re.search(r"策略|谋略|判断|怎么看|怎么样|怎么办|下一步|怎么谈|怎么聊|抓手", compact):
+        return "strategy_question"
+    if has_business:
+        return "business_question"
+    return "casual_chat"
+
+
+def _operator_salutation(task: SuFenTaskPackage) -> str:
+    operator = task.operator
+    if bool(getattr(operator, "isGangGe", False)) or str(getattr(operator, "userId", "")).strip() == "52707407":
+        return "刚哥"
+    name = str(getattr(operator, "name", "") or "").strip()
+    return name or "我"
+
+
+def _short_casual_answer(raw_user_message: str, task: SuFenTaskPackage) -> str:
+    salutation = _operator_salutation(task)
+    compact = re.sub(r"\s+", "", raw_user_message or "")
+    if "晚安" in compact:
+        return f"{salutation}，晚安。我在。"
+    if "晚上好" in compact:
+        return f"{salutation}晚上好，我在。你先说，我听着。"
+    if "早上好" in compact:
+        return f"{salutation}早上好，我在。"
+    if "中午好" in compact:
+        return f"{salutation}中午好，我在。"
+    if "下午好" in compact:
+        return f"{salutation}下午好，我在。"
+    if "在吗" in compact or "还在吗" in compact:
+        return f"{salutation}，我在。"
+    if re.search(r"谢谢|辛苦了", compact):
+        return f"{salutation}，收到。"
+    return f"{salutation}，我在。"
 
 
 def _extract_json_object(text: str) -> dict[str, Any]:
@@ -503,9 +592,10 @@ def _system_message(task: SuFenTaskPackage) -> str:
         "SuFen 的长期 memory 是单一人工维护根目录，只能通过 sufen_memory_search 只读检索；模型不得自选 memoryRoot，不得创建 scoped memory，不得输出 memoryPatch："
         + json.dumps(scope, ensure_ascii=False, sort_keys=True),
         _runtime_anchor_card(task),
+        "用户本轮原话是最高优先级的意图来源；taskPackage、档案事实包、图谱状态和历史日志只是后台参考材料。先判断用户是在寒暄、确认、问事实、问策略还是要报告，再决定要不要展开资料。寒暄和简单确认不得因为当前页面有档案或图谱缺失而输出档案名、业主名、低置信度、资料缺口或方法论缺口。",
         "My Stand taskPackage.archiveContext.archive、archiveContext.broker、archiveContext.archiveRows、archiveSummary、parserToolResults、referenceContext 和 systemFoundationContext 是后端已按权限注入的当前可读资料；只要这些字段里已有当前档案资料，必须直接读取并据此回答，不得因为用户没有额外粘贴 AUTH/OUT/KGREF 就说当前档案缺资料。但 archive 内部必须按 verifiedFacts/sourceQuality/legacySignals 分级使用，usableAsCurrentFact=false 的内容只能做低置信度线索，不能当当前事实。",
         "必须遵守 taskPackage.archiveContext.contextLoadPlan：先用 loaded 层轻量回应或确认意图，目标明确后再按触发条件展开特征卡、房源笔记、图片/OCR、知识图谱等未加载层；未标记 loaded 的资料不得假装已读。",
-        "必须遵守 requiredKnowledgeGraph/knowledgeGraphBinding：经纪人个人业务档案只用“经纪人成长路径”，房源维护只用“房源维护”，客户跟进只用“客户跟进”，售后维护只用“售后维护”。图谱缺失、未授权或为空时必须明说低置信度，不能换用别的图谱。",
+        "必须遵守 requiredKnowledgeGraph/knowledgeGraphBinding：经纪人个人业务档案只用“经纪人成长路径”，房源维护只用“房源维护”，客户跟进只用“客户跟进”，售后维护只用“售后维护”。只有当用户明确要业务判断、策略路径、方法论或报告时，图谱缺失、未授权或为空才需要用自然语言点出资料边界；寒暄、目标确认和简单事实回答不得被图谱缺口阻塞，也不得输出“低置信度”口头禅。",
         "每轮必须填写 dialogueDigest，专供 My Stand 后端判断是否写入查看日志。dialogueDigest 要极致压缩但准确：coreIntent 一句话，discussionSummary 两三句话，finalOutcome 一句话；subjectRelevance.shouldPersist 必须保守，只有内容确实服务当前入口和当前档案对象时才为 true。寒暄、闲聊、测试能力、跑题、别的档案内容、原始附件全文、临时财务明细都不得建议沉淀。",
         _authorized_context_card(task),
         "所有事件和字段修改都只能作为 draft 返回，不能直接写正式数据；SuFen 不返回记忆修改草稿。",
@@ -514,7 +604,9 @@ def _system_message(task: SuFenTaskPackage) -> str:
 
 def _user_message(prompt: str, task: SuFenTaskPackage) -> str:
     return "\n\n".join([
-        "经纪人问题：",
+        "用户本轮原话（最高优先用于意图判断）：",
+        _raw_user_message(prompt, task),
+        "经纪人问题和本轮额外材料：",
         prompt or "",
         "My Stand 后端注入的 taskPackage：",
         json.dumps(task.model_dump(mode="json"), ensure_ascii=False, sort_keys=True, indent=2),
@@ -747,8 +839,8 @@ def _compact_sparse_property_answer_if_needed(
                 break
     facts_text = "，".join(facts) or "当前只看到很少的基础字段"
     response.answer = (
-        f"现在只能低置信度看：{facts_text}。"
-        "房源笔记、同小区同户型公开行情、带看反馈和业主底线都没核实，我不能给等级、分数或成交概率。"
+        f"先别急着定等级。现在只够看这些基础事实：{facts_text}。"
+        "房源笔记、同户型行情、带看反馈和业主底线还没核实，我不能给分数、成交概率或完整结论。"
         "下一步先补一个关键证据：把房源笔记和同户型行情核出来，再判断这套房子值不值得重点维护。"
     )
     if response.dialogueDigest is not None:
@@ -789,7 +881,7 @@ def _prefix_property_owner_boundary_if_needed(
     answer = response.answer or ""
     if re.search(r"只看到|只能看到|不能判断|没法判断|未确认|低置信|线索|资料不足|证据", answer):
         return response
-    prefix = "目前只能低置信度处理：我看不到业主特征卡和完整沟通记录，不能判断业主态度或价格心理。"
+    prefix = "我先不判断业主心态，只给低风险开口：现在看不到业主特征卡和完整沟通记录，别急着猜他的价格心理。"
     response.answer = f"{prefix}\n\n{answer}"
     if response.dialogueDigest is not None:
         response.dialogueDigest.discussionSummary = (
@@ -802,6 +894,54 @@ def _prefix_property_owner_boundary_if_needed(
             status="ok",
         )
     )
+    return response
+
+
+def _final_answer_guardrail(
+    response: SuFenResponse,
+    *,
+    task: SuFenTaskPackage,
+    prompt: str,
+) -> SuFenResponse:
+    intent = _classify_user_intent(prompt, task)
+    raw_user_message = _raw_user_message(prompt, task)
+    if intent in {"casual_greeting", "casual_ack"}:
+        response.answer = _short_casual_answer(raw_user_message, task)
+        response.dialogueDigest = DialogueDigest(
+            coreIntent="用户做简短寒暄或确认",
+            discussionSummary="SuFen 只做简短回应，没有展开档案事实、资料缺口、图谱状态或业务判断。",
+            finalOutcome="已简短回应，不形成业务结论。",
+            userAcceptance="chat",
+            subjectRelevance=DialogueSubjectRelevance(
+                level="none",
+                shouldPersist=False,
+                reason="寒暄、问候或简单确认，不进入当前档案日志。",
+            ),
+        )
+        response.evidenceUsed = []
+        response.missingAuthorizationRequests = []
+        response.eventDrafts = []
+        response.fieldPatchDrafts = []
+        response.memoryPatch = None
+        response.toolAudit.append(
+            ToolAuditItem(
+                tool="provider.output_guardrail",
+                action="casual_short_answer",
+                status="ok",
+            )
+        )
+        return response
+
+    answer = response.answer or ""
+    if "目前只能低置信度处理" in answer:
+        response.answer = answer.replace("目前只能低置信度处理：", "资料还薄，我先收住判断：")
+        response.toolAudit.append(
+            ToolAuditItem(
+                tool="provider.output_guardrail",
+                action="naturalize_confidence_prefix",
+                status="ok",
+            )
+        )
     return response
 
 
@@ -1017,9 +1157,11 @@ def answer_with_provider(
                 )
                 response = _compact_sparse_property_answer_if_needed(response, task=task, prompt=prompt)
                 response = _prefix_property_owner_boundary_if_needed(response, task=task, prompt=prompt)
+                response = _final_answer_guardrail(response, task=task, prompt=prompt)
                 return response
             response = _compact_sparse_property_answer_if_needed(response, task=task, prompt=prompt)
             response = _prefix_property_owner_boundary_if_needed(response, task=task, prompt=prompt)
+            response = _final_answer_guardrail(response, task=task, prompt=prompt)
             response.toolAudit.extend(loop_audit)
             response.toolAudit.append(
                 ToolAuditItem(tool="provider.chat_completions", action="real_provider_request", status=f"ok_turns:{turn}")
@@ -1047,6 +1189,7 @@ def answer_with_provider(
                 )
                 response = _compact_sparse_property_answer_if_needed(response, task=task, prompt=prompt)
                 response = _prefix_property_owner_boundary_if_needed(response, task=task, prompt=prompt)
+                response = _final_answer_guardrail(response, task=task, prompt=prompt)
                 return response
             return response
 
@@ -1061,5 +1204,5 @@ def answer_with_provider(
         )
         response = _compact_sparse_property_answer_if_needed(response, task=task, prompt=prompt)
         response = _prefix_property_owner_boundary_if_needed(response, task=task, prompt=prompt)
-        return response
+        response = _final_answer_guardrail(response, task=task, prompt=prompt)
     return response

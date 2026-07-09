@@ -10,8 +10,10 @@ from sufen.output import SuFenResponse
 from sufen.property_strategy import build_property_archive_response
 from sufen.provider import (
     _authorized_context_fallback_response,
+    _classify_user_intent,
     _compact_sparse_property_answer_if_needed,
     _extract_json_object,
+    _final_answer_guardrail,
     _normalize_provider_response_payload,
     _prefix_property_owner_boundary_if_needed,
     _system_message,
@@ -153,6 +155,9 @@ def test_provider_system_message_binds_knowledge_graph_and_logs() -> None:
     assert "某总/某姐/某哥" in system
     assert "公开资料显示/我查到" in system
     assert "不得因为用户随口问了一句就输出全维度分析" in system
+    assert "用户本轮原话是最高优先级的意图来源" in system
+    assert "寒暄和简单确认不得因为当前页面有档案或图谱缺失" in system
+    assert "不得输出“低置信度”口头禅" in system
 
 
 def test_authorized_context_fallback_uses_verified_facts_only() -> None:
@@ -259,7 +264,8 @@ def test_sparse_property_broad_question_is_compacted() -> None:
     )
     compact = _compact_sparse_property_answer_if_needed(response, task=task, prompt="这套房子怎么样？")
     assert len(compact.answer) < 320
-    assert "不能给等级、分数或成交概率" in compact.answer
+    assert "不能给分数、成交概率或完整结论" in compact.answer
+    assert "低置信度" not in compact.answer
     assert "provider.postprocess" in {item.tool for item in compact.toolAudit}
     assert compact.dialogueDigest is not None
     assert compact.dialogueDigest.subjectRelevance.shouldPersist is False
@@ -290,9 +296,64 @@ def test_owner_communication_gets_evidence_boundary_prefix() -> None:
         },
     )
     patched = _prefix_property_owner_boundary_if_needed(response, task=task, prompt="这个业主怎么开口比较好？")
-    assert patched.answer.startswith("目前只能低置信度处理")
-    assert "不能判断业主态度或价格心理" in patched.answer
+    assert patched.answer.startswith("我先不判断业主心态")
+    assert "别急着猜他的价格心理" in patched.answer
+    assert "目前只能低置信度处理" not in patched.answer
     assert "provider.postprocess" in {item.tool for item in patched.toolAudit}
+
+
+def test_casual_greeting_is_hidden_from_archive_context_and_short() -> None:
+    task = make_task(
+        operator={"userId": "52707407", "name": "刚哥", "role": "admin", "isGangGe": True},
+        archiveContext={
+            "companyId": "company-ZYJ",
+            "archive": {
+                "id": "M000001:FYWH1",
+                "type": "property",
+                "displayName": "中海城南一号 2-1-1001",
+                "ownerName": "汤永明",
+                "fields": {"楼盘": "中海城南一号", "房号": "2-1-1001", "业主姓名": "汤永明"},
+                "verifiedFacts": {"fields": {"楼盘": "中海城南一号", "房号": "2-1-1001", "业主姓名": "汤永明"}, "events": []},
+                "sourceQuality": {"evidenceCompleteness": {"status": "current_facts_sparse"}},
+            },
+            "requiredKnowledgeGraph": {
+                "requiredName": "房源维护",
+                "status": "configured_placeholder",
+                "refId": "KGREF-property-maintenance",
+            },
+            "userMessageForSufen": "sufen晚上好",
+            "sufenUserIntent": "casual_greeting",
+        },
+        requiredKnowledgeGraph={"requiredName": "房源维护", "status": "configured_placeholder", "refId": "KGREF-property-maintenance"},
+    )
+    response = SuFenResponse(
+        answer="目前只能低置信度看：中海城南一号 2-1-1001，业主汤永明，资料不足。",
+        dialogueDigest={
+            "coreIntent": "寒暄",
+            "discussionSummary": "错误展开了当前房源。",
+            "finalOutcome": "错误输出。",
+            "userAcceptance": "unclear",
+            "subjectRelevance": {"level": "direct", "shouldPersist": True, "reason": "错误。"},
+        },
+        evidenceUsed=[{"source": "archive", "summary": "中海城南一号 2-1-1001", "confidence": 0.5}],
+    )
+    patched = _final_answer_guardrail(response, task=task, prompt="sufen晚上好")
+    assert patched.answer == "刚哥晚上好，我在。你先说，我听着。"
+    assert "低置信度" not in patched.answer
+    assert "中海城南一号" not in patched.answer
+    assert "汤永明" not in patched.answer
+    assert patched.evidenceUsed == []
+    assert patched.dialogueDigest is not None
+    assert patched.dialogueDigest.userAcceptance == "chat"
+    assert patched.dialogueDigest.subjectRelevance.shouldPersist is False
+    assert any(item.tool == "provider.output_guardrail" and item.action == "casual_short_answer" for item in patched.toolAudit)
+
+
+def test_intent_classifier_keeps_business_questions_out_of_greeting_fast_path() -> None:
+    task = make_task()
+    assert _classify_user_intent("sufen晚上好", task) == "casual_greeting"
+    assert _classify_user_intent("晚上好，这套房子怎么样？", task) == "strategy_question"
+    assert _classify_user_intent("这个业主怎么聊？", task) == "owner_communication"
 
 
 def test_provider_normalization_forces_memory_patch_null_and_cleans_dialogue_digest() -> None:
