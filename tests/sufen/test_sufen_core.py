@@ -271,6 +271,41 @@ def test_sparse_property_broad_question_is_compacted() -> None:
     assert compact.dialogueDigest.subjectRelevance.shouldPersist is False
 
 
+def test_sparse_property_medium_answer_with_owner_or_score_is_compacted() -> None:
+    task = make_task(archiveContext={
+        "companyId": "company-ZYJ",
+        "archive": {
+            "id": "P-1",
+            "type": "property",
+            "displayName": "虚拟花园 1-1-101",
+            "fields": {"楼盘": "虚拟花园", "房号": "1-1-101", "面积": "185平", "报价": "880万"},
+            "verifiedFacts": {
+                "fields": {"楼盘": "虚拟花园", "房号": "1-1-101", "面积": "185平", "报价": "880万"},
+                "events": [],
+            },
+            "sourceQuality": {
+                "evidenceCompleteness": {"status": "current_facts_sparse"},
+            },
+        },
+    })
+    response = SuFenResponse(
+        answer="刚哥，这套房还看不清。五维评分卡里价格偏低，业主“汤总”的称呼不能推性格。现在还缺房源笔记、公开行情和带看反馈，要先补材料再判断。",
+        dialogueDigest={
+            "coreIntent": "判断这套房子怎么样",
+            "discussionSummary": "展开了评分卡和业主称呼。",
+            "finalOutcome": "未形成结论。",
+            "userAcceptance": "unclear",
+            "subjectRelevance": {"level": "direct", "shouldPersist": True, "reason": "模型误判。"},
+        },
+    )
+    compact = _compact_sparse_property_answer_if_needed(response, task=task, prompt="这套房子怎么样？")
+    assert "五维评分" not in compact.answer
+    assert "汤总" not in compact.answer
+    assert len(compact.answer) < 320
+    assert compact.dialogueDigest is not None
+    assert compact.dialogueDigest.subjectRelevance.shouldPersist is False
+
+
 def test_owner_communication_gets_evidence_boundary_prefix() -> None:
     task = make_task(archiveContext={
         "companyId": "company-ZYJ",
@@ -300,6 +335,39 @@ def test_owner_communication_gets_evidence_boundary_prefix() -> None:
     assert "别急着猜他的价格心理" in patched.answer
     assert "目前只能低置信度处理" not in patched.answer
     assert "provider.postprocess" in {item.tool for item in patched.toolAudit}
+
+
+def test_property_postprocessors_use_raw_user_message_not_background_prompt() -> None:
+    task = make_task(archiveContext={
+        "companyId": "company-ZYJ",
+        "userMessageForSufen": "随便聊聊",
+        "sufenUserIntent": "casual_chat",
+        "archive": {
+            "id": "P-1",
+            "type": "property",
+            "fields": {"业主姓名": "汤总", "楼盘": "虚拟花园"},
+            "verifiedFacts": {"fields": {"业主姓名": "汤总", "楼盘": "虚拟花园"}, "events": []},
+            "sourceQuality": {
+                "subjectFeatureCard": {"status": "not_loaded"},
+                "evidenceCompleteness": {"status": "current_facts_sparse"},
+            },
+        },
+    })
+    prompt = "用户本轮原话（最高优先用于意图判断）：\n随便聊聊\n\n后台档案事实包：业主怎么沟通；这套房子怎么样。"
+    response = SuFenResponse(
+        answer="刚哥，今晚想聊点什么？",
+        dialogueDigest={
+            "coreIntent": "闲聊",
+            "discussionSummary": "简短回应。",
+            "finalOutcome": "未形成业务结论。",
+            "userAcceptance": "chat",
+            "subjectRelevance": {"level": "none", "shouldPersist": False, "reason": "闲聊。"},
+        },
+    )
+    compact = _compact_sparse_property_answer_if_needed(response, task=task, prompt=prompt)
+    patched = _prefix_property_owner_boundary_if_needed(compact, task=task, prompt=prompt)
+    assert patched.answer == "刚哥，今晚想聊点什么？"
+    assert not any(item.action in {"compact_sparse_property_answer", "prefix_property_owner_boundary"} for item in patched.toolAudit)
 
 
 def test_casual_greeting_is_hidden_from_archive_context_and_short() -> None:
@@ -347,6 +415,62 @@ def test_casual_greeting_is_hidden_from_archive_context_and_short() -> None:
     assert patched.dialogueDigest.userAcceptance == "chat"
     assert patched.dialogueDigest.subjectRelevance.shouldPersist is False
     assert any(item.tool == "provider.output_guardrail" and item.action == "casual_short_answer" for item in patched.toolAudit)
+
+
+def test_casual_chat_leaked_archive_context_is_cleaned() -> None:
+    task = make_task(
+        operator={"userId": "52707407", "name": "刚哥", "role": "admin", "isGangGe": True},
+        archiveContext={
+            "companyId": "company-ZYJ",
+            "archive": {
+                "id": "M000001:FYWH1",
+                "type": "property",
+                "displayName": "中海城南一号 2-1-1001",
+                "ownerName": "汤永明",
+                "fields": {"楼盘": "中海城南一号", "房号": "2-1-1001", "业主姓名": "汤永明"},
+            },
+            "userMessageForSufen": "随便聊聊",
+            "sufenUserIntent": "casual_chat",
+        },
+    )
+    response = SuFenResponse(
+        answer="中海城南一号 2-1-1001 的业主汤永明当前资料缺口较多。",
+        dialogueDigest={
+            "coreIntent": "闲聊",
+            "discussionSummary": "错误泄露档案背景。",
+            "finalOutcome": "错误输出。",
+            "userAcceptance": "unclear",
+            "subjectRelevance": {"level": "direct", "shouldPersist": True, "reason": "错误。"},
+        },
+        evidenceUsed=[{"source": "archive", "summary": "中海城南一号 2-1-1001", "confidence": 0.5}],
+    )
+    patched = _final_answer_guardrail(response, task=task, prompt="随便聊聊")
+    assert patched.answer == "刚哥，我在。你先说，我听着。"
+    assert "中海城南一号" not in patched.answer
+    assert "汤永明" not in patched.answer
+    assert patched.evidenceUsed == []
+    assert patched.dialogueDigest is not None
+    assert patched.dialogueDigest.subjectRelevance.shouldPersist is False
+    assert any(item.tool == "provider.output_guardrail" and item.action == "casual_chat_background_cleanup" for item in patched.toolAudit)
+
+
+def test_final_guardrail_naturalizes_fixed_low_confidence_language() -> None:
+    task = make_task(archiveContext={"userMessageForSufen": "这套房子怎么样？"})
+    response = SuFenResponse(
+        answer="目前只能低置信度处理：房源笔记和公开行情都没核实，只能低置信度回答。",
+        dialogueDigest={
+            "coreIntent": "判断房源",
+            "discussionSummary": "说明资料不足。",
+            "finalOutcome": "未形成结论。",
+            "userAcceptance": "unclear",
+            "subjectRelevance": {"level": "direct", "shouldPersist": False, "reason": "资料不足。"},
+        },
+    )
+    patched = _final_answer_guardrail(response, task=task, prompt="这套房子怎么样？")
+    assert "低置信度" not in patched.answer
+    assert patched.answer.startswith("资料还薄，我先收住判断")
+    assert "只能先克制回答" in patched.answer
+    assert any(item.tool == "provider.output_guardrail" and item.action == "naturalize_public_boundary_language" for item in patched.toolAudit)
 
 
 def test_intent_classifier_keeps_business_questions_out_of_greeting_fast_path() -> None:

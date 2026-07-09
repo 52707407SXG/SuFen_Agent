@@ -760,7 +760,7 @@ def _authorized_context_fallback_response(
         f"{rows_markdown}\n\n"
         "**判断**\n"
         "- 以上只列 My Stand 本轮已授权的可展示事实和证据状态；旧状态、旧摘要、旧分数、称呼和历史日志不在这里当事实使用。\n"
-        "- 如果你问的是“这套房子怎么样”，这份兜底回答只能低置信度收口，不能替代房源笔记、公开行情、带看反馈和业主沟通证据。\n\n"
+        "- 如果你问的是“这套房子怎么样”，这份兜底回答只算临时收口，不能替代房源笔记、公开行情、带看反馈和业主沟通证据。\n\n"
         "**下一步**\n"
         "1. 先补一个关键证据：房源笔记、同小区同户型行情、最近带看反馈或业主真实底线。\n"
         "2. 证据补齐后再判断等级、维护策略或话术；现在不要硬下结论。\n"
@@ -771,12 +771,12 @@ def _authorized_context_fallback_response(
         dialogueDigest=DialogueDigest(
             coreIntent=f"读取当前{scene}档案并围绕本轮问题给出初步判断",
             discussionSummary=f"模型误判缺资料后，SuFen 使用 My Stand 后端已授权注入的 taskPackage 读取当前档案 {title}，并提示后续按当前档案事实确认沟通目标。",
-            finalOutcome="本轮只给出基于当前授权事实卡的低置信度兜底说明，未形成可入档的正式业务判断。",
+            finalOutcome="本轮只给出基于当前授权事实卡的临时兜底说明，未形成可入档的正式业务判断。",
             userAcceptance="unclear",
             subjectRelevance=DialogueSubjectRelevance(
                 level="direct" if subject_payload else "none",
                 shouldPersist=False,
-                reason="兜底回答只用于纠正模型缺资料误判，低置信度且未形成正式业务结论，不建议沉淀。" if subject_payload else "缺少当前档案对象，不建议沉淀。",
+                reason="兜底回答只用于纠正模型缺资料误判，证据不足且未形成正式业务结论，不建议沉淀。" if subject_payload else "缺少当前档案对象，不建议沉淀。",
             ),
         ),
         evidenceUsed=[
@@ -813,7 +813,11 @@ def _compact_sparse_property_answer_if_needed(
 ) -> SuFenResponse:
     if task.subject.type != "property":
         return response
-    if not re.search(r"这套房子怎么样|这套房.*怎么样|能不能算好房|值不值得|怎么判断|房子到底", prompt or ""):
+    intent = _classify_user_intent(prompt, task)
+    if intent in {"casual_greeting", "casual_ack", "casual_chat"}:
+        return response
+    raw_user_message = _raw_user_message(prompt, task)
+    if not re.search(r"这套房子怎么样|这套房.*怎么样|能不能算好房|值不值得|怎么判断|房子到底", raw_user_message or ""):
         return response
     archive = task.archiveContext.get("archive") if isinstance(task.archiveContext, dict) else {}
     if not isinstance(archive, dict):
@@ -824,7 +828,8 @@ def _compact_sparse_property_answer_if_needed(
         return response
     answer = response.answer or ""
     numbered_items = len(re.findall(r"(?:^|\n)\s*(?:[-*]|\d+[.、])\s+", answer))
-    if len(answer) <= 620 and numbered_items <= 4:
+    overexposed_sparse_terms = re.search(r"业主[“\"']?[^，。；\n]{1,12}[”\"']?|汤总|汤永明|五维评分|评分卡|满分|图谱缺|知识图谱", answer)
+    if len(answer) <= 220 and numbered_items <= 2 and not overexposed_sparse_terms:
         return response
 
     verified = archive.get("verifiedFacts") if isinstance(archive.get("verifiedFacts"), dict) else {}
@@ -868,7 +873,11 @@ def _prefix_property_owner_boundary_if_needed(
 ) -> SuFenResponse:
     if task.subject.type != "property":
         return response
-    if not re.search(r"业主.*(怎么|沟通|开口|聊|话术)|这个业主|这种业主", prompt or ""):
+    intent = _classify_user_intent(prompt, task)
+    if intent in {"casual_greeting", "casual_ack", "casual_chat"}:
+        return response
+    raw_user_message = _raw_user_message(prompt, task)
+    if not re.search(r"业主.*(怎么|沟通|开口|聊|话术)|这个业主|这种业主", raw_user_message or ""):
         return response
     archive = task.archiveContext.get("archive") if isinstance(task.archiveContext, dict) else {}
     if not isinstance(archive, dict):
@@ -895,6 +904,54 @@ def _prefix_property_owner_boundary_if_needed(
         )
     )
     return response
+
+
+def _archive_leak_terms(task: SuFenTaskPackage) -> list[str]:
+    archive_context = _archive_context(task)
+    archive = archive_context.get("archive") if isinstance(archive_context.get("archive"), dict) else {}
+    terms: list[str] = []
+    if isinstance(archive, dict):
+        for key in ("displayName", "name", "ownerName", "id"):
+            value = _text(archive.get(key))
+            if len(value) >= 3:
+                terms.append(value)
+        fields = archive.get("fields") if isinstance(archive.get("fields"), dict) else {}
+        for key in ("楼盘", "房号", "业主姓名", "客户姓名"):
+            value = _text(fields.get(key))
+            if len(value) >= 3:
+                terms.append(value)
+    return list(dict.fromkeys(terms))
+
+
+def _answer_leaks_background(answer: str, task: SuFenTaskPackage) -> bool:
+    compact = re.sub(r"\s+", "", answer or "")
+    if re.search(r"低置信|图谱缺|知识图谱|资料缺口|证据清单|后台档案|档案事实包|业主特征卡|完整沟通记录|价格心理", compact):
+        return True
+    return any(term and term in answer for term in _archive_leak_terms(task))
+
+
+def _naturalize_public_boundary_language(answer: str) -> str:
+    text = answer or ""
+    replacements = [
+        ("目前只能低置信度处理：", "资料还薄，我先收住判断："),
+        ("目前只能低置信度处理", "资料还薄，我先收住判断"),
+        ("现在只能低置信度看：", "资料还薄，我先看已确认的部分："),
+        ("现在只能低置信度看", "资料还薄，我先看已确认的部分"),
+        ("目前只能低置信度看：", "资料还薄，我先看已确认的部分："),
+        ("目前只能低置信度看", "资料还薄，我先看已确认的部分"),
+        ("当前只能低置信度判断", "当前资料还薄，先收住判断"),
+        ("本轮只能低置信度", "本轮只能先克制"),
+        ("只能低置信度回答", "只能先克制回答"),
+        ("只能低置信度收口", "只能先临时收口"),
+        ("低置信度兜底", "临时兜底"),
+        ("低置信度线索", "未校验线索"),
+        ("低置信度", "资料还薄"),
+        ("低一置信度", "资料还薄"),
+    ]
+    for before, after in replacements:
+        text = text.replace(before, after)
+    text = re.sub(r"资料还薄[地的]*资料还薄", "资料还薄", text)
+    return text
 
 
 def _final_answer_guardrail(
@@ -933,12 +990,40 @@ def _final_answer_guardrail(
         return response
 
     answer = response.answer or ""
-    if "目前只能低置信度处理" in answer:
-        response.answer = answer.replace("目前只能低置信度处理：", "资料还薄，我先收住判断：")
+    if intent == "casual_chat" and _answer_leaks_background(answer, task):
+        response.answer = f"{_operator_salutation(task)}，我在。你先说，我听着。"
+        response.dialogueDigest = DialogueDigest(
+            coreIntent="用户做轻量闲聊或试探",
+            discussionSummary="SuFen 清理了不该前台展开的档案背景，只保留自然回应。",
+            finalOutcome="已简短回应，不形成业务结论。",
+            userAcceptance="chat",
+            subjectRelevance=DialogueSubjectRelevance(
+                level="none",
+                shouldPersist=False,
+                reason="闲聊或试探不进入当前档案日志。",
+            ),
+        )
+        response.evidenceUsed = []
+        response.missingAuthorizationRequests = []
+        response.eventDrafts = []
+        response.fieldPatchDrafts = []
+        response.memoryPatch = None
         response.toolAudit.append(
             ToolAuditItem(
                 tool="provider.output_guardrail",
-                action="naturalize_confidence_prefix",
+                action="casual_chat_background_cleanup",
+                status="ok",
+            )
+        )
+        return response
+
+    clean_answer = _naturalize_public_boundary_language(answer)
+    if clean_answer != answer:
+        response.answer = clean_answer
+        response.toolAudit.append(
+            ToolAuditItem(
+                tool="provider.output_guardrail",
+                action="naturalize_public_boundary_language",
                 status="ok",
             )
         )
